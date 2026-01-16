@@ -8,7 +8,9 @@ from langchain_core._api.deprecation import LangChainDeprecationWarning
 from lfx.components._importing import import_mod
 
 if TYPE_CHECKING:
+    from .clickhouse_sql import ClickHouseSQLToolComponent
     from .calculator import CalculatorToolComponent
+    from .conditional_routing_tool_example import ConditionalRoutingToolComponent
     from .python_code_structured_tool import PythonCodeStructuredTool
     from .python_repl import PythonREPLToolComponent
     from .search_api import SearchAPIComponent
@@ -20,7 +22,9 @@ if TYPE_CHECKING:
     from .yahoo_finance import YfinanceToolComponent
 
 _dynamic_imports = {
+    "ClickHouseSQLToolComponent": "clickhouse_sql",
     "CalculatorToolComponent": "calculator",
+    "ConditionalRoutingToolComponent": "conditional_routing_tool_example",
     "PythonCodeStructuredTool": "python_code_structured_tool",
     "PythonREPLToolComponent": "python_repl",
     "SearchAPIComponent": "search_api",
@@ -33,7 +37,9 @@ _dynamic_imports = {
 }
 
 __all__ = [
+    "ClickHouseSQLToolComponent",
     "CalculatorToolComponent",
+    "ConditionalRoutingToolComponent",
     "PythonCodeStructuredTool",
     "PythonREPLToolComponent",
     "SearXNGToolComponent",

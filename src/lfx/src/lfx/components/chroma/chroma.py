@@ -7,7 +7,8 @@ from typing_extensions import override
 
 from lfx.base.vectorstores.model import LCVectorStoreComponent, check_cached_vector_store
 from lfx.base.vectorstores.utils import chroma_collection_to_data
-from lfx.inputs.inputs import BoolInput, DropdownInput, HandleInput, IntInput, StrInput
+from lfx.helpers.data import docs_to_data
+from lfx.inputs.inputs import BoolInput, DropdownInput, FloatInput, HandleInput, IntInput, StrInput
 from lfx.schema.data import Data
 
 if TYPE_CHECKING:
@@ -66,11 +67,20 @@ class ChromaVectorStoreComponent(LCVectorStoreComponent):
             info="If false, will not add documents that are already in the Vector Store.",
         ),
         DropdownInput(
+            name="search_method",
+            display_name="Search Method",
+            options=["Vector Search", "Hybrid Search"],
+            value="Vector Search",
+            advanced=True,
+            info="Vector Search uses semantic similarity only. Hybrid Search combines vector similarity with keyword/BM25 search.",
+        ),
+        DropdownInput(
             name="search_type",
             display_name="Search Type",
             options=["Similarity", "MMR"],
             value="Similarity",
             advanced=True,
+            info="Search type for vector search. Only used when Search Method is Vector Search.",
         ),
         IntInput(
             name="number_of_results",
@@ -78,6 +88,27 @@ class ChromaVectorStoreComponent(LCVectorStoreComponent):
             info="Number of results to return.",
             advanced=True,
             value=10,
+        ),
+        FloatInput(
+            name="vector_weight",
+            display_name="Vector Weight",
+            value=0.7,
+            advanced=True,
+            info="Weight for vector similarity search in hybrid mode (0.0-1.0). Higher values prioritize semantic similarity.",
+        ),
+        FloatInput(
+            name="keyword_weight",
+            display_name="Keyword Weight",
+            value=0.3,
+            advanced=True,
+            info="Weight for keyword/BM25 search in hybrid mode (0.0-1.0). Higher values prioritize exact term matching.",
+        ),
+        IntInput(
+            name="hybrid_search_limit",
+            display_name="Hybrid Search Limit",
+            value=100,
+            advanced=True,
+            info="Number of candidates to retrieve from each search method before fusion in hybrid search.",
         ),
         IntInput(
             name="limit",
@@ -167,3 +198,243 @@ class ChromaVectorStoreComponent(LCVectorStoreComponent):
                 vector_store.add_documents(documents)
         else:
             self.log("No documents to add to the Vector Store.")
+
+    @override
+    def search_documents(self) -> list[Data]:
+        """Search for documents in the vector store with optional hybrid search."""
+        if self._cached_vector_store is not None:
+            vector_store = self._cached_vector_store
+        else:
+            vector_store = self.build_vector_store()
+            self._cached_vector_store = vector_store
+
+        search_query: str = self.search_query
+        if not search_query:
+            self.status = ""
+            return []
+
+        self.log(f"Search input: {search_query}")
+        self.log(f"Search method: {self.search_method}")
+        self.log(f"Number of results: {self.number_of_results}")
+
+        # Use hybrid search if enabled
+        if getattr(self, "search_method", "Vector Search") == "Hybrid Search":
+            return self._hybrid_search(vector_store, search_query)
+
+        # Use standard vector search
+        self.log(f"Search type: {self.search_type}")
+        search_results = self.search_with_vector_store(
+            search_query, self.search_type, vector_store, k=self.number_of_results
+        )
+        self.status = search_results
+        return search_results
+
+    def _hybrid_search(self, vector_store: Chroma, query: str) -> list[Data]:
+        """Perform hybrid search combining vector similarity and keyword search."""
+        try:
+            # Try ChromaDB native hybrid search first
+            return self._chroma_native_hybrid_search(vector_store, query)
+        except (AttributeError, ImportError, TypeError) as e:
+            # These exceptions indicate the native API is not available or incompatible
+            self.log(f"ChromaDB native hybrid search not available: {e}. Falling back to EnsembleRetriever.")
+            # Fall back to EnsembleRetriever pattern
+            return self._ensemble_retriever_hybrid_search(vector_store, query)
+        except ValueError as e:
+            # ValueError for missing embedding should propagate (configuration error)
+            # But other ValueErrors (e.g., invalid API usage) can fall back
+            if "embedding" in str(e).lower() or "required" in str(e).lower():
+                raise  # Re-raise configuration errors
+            self.log(f"Error during ChromaDB native hybrid search: {e}. Falling back to EnsembleRetriever.")
+            return self._ensemble_retriever_hybrid_search(vector_store, query)
+        except Exception as e:
+            # Catch any other runtime errors during native hybrid search execution
+            # (e.g., errors calling hybrid_search, result parsing issues, etc.)
+            self.log(f"Error during ChromaDB native hybrid search: {e}. Falling back to EnsembleRetriever.")
+            return self._ensemble_retriever_hybrid_search(vector_store, query)
+
+    def _chroma_native_hybrid_search(self, vector_store: Chroma, query: str) -> list[Data]:
+        """Use ChromaDB's native hybrid search API if available."""
+        try:
+            from chromadb import K, Knn, Rrf, Search
+        except ImportError as e:
+            msg = "ChromaDB native hybrid search requires chromadb package with hybrid search support."
+            raise ImportError(msg) from e
+
+        # Access underlying Chroma collection
+        collection = vector_store._collection  # noqa: SLF001
+
+        # Check if hybrid_search method exists
+        if not hasattr(collection, "hybrid_search"):
+            raise AttributeError("ChromaDB collection does not support hybrid_search method.")
+
+        # Get weights (normalize if needed)
+        vector_weight = float(getattr(self, "vector_weight", 0.7))
+        keyword_weight = float(getattr(self, "keyword_weight", 0.3))
+        hybrid_limit = int(getattr(self, "hybrid_search_limit", 100))
+        num_results = int(self.number_of_results)
+
+        # Normalize weights
+        total_weight = vector_weight + keyword_weight
+        if total_weight > 0:
+            vector_weight = vector_weight / total_weight
+            keyword_weight = keyword_weight / total_weight
+
+        # Embed the query for vector search
+        if not self.embedding:
+            raise ValueError("Embedding is required for hybrid search.")
+
+        # ChromaDB's Knn accepts query (text string) not query_embeddings
+        # The embedding function is handled by the collection
+        # Build hybrid rank using RRF (Reciprocal Rank Fusion)
+        # Note: ChromaDB API - Knn accepts query (text) not embeddings
+        try:
+            # Try with sparse embedding key (requires ChromaDB Cloud with sparse support)
+            # For open-source ChromaDB, this will fail and fall back to single dense query
+            hybrid_rank = Rrf(
+                ranks=[
+                    Knn(query=query, return_rank=True, limit=hybrid_limit),
+                    Knn(query=query, key="sparse_embedding", return_rank=True, limit=hybrid_limit),
+                ],
+                weights=[vector_weight, keyword_weight],
+                k=num_results,
+            )
+        except (TypeError, AttributeError, ValueError) as e:
+            # Fallback: use only dense vector search if sparse not available
+            # This happens with open-source ChromaDB which doesn't support sparse embeddings
+            self.log(f"Sparse embedding not available ({e}), using vector search only.")
+            hybrid_rank = Rrf(
+                ranks=[
+                    Knn(query=query, return_rank=True, limit=hybrid_limit),
+                ],
+                weights=[1.0],
+                k=num_results,
+            )
+
+        # Build search query
+        search = (
+            Search()
+            .rank(hybrid_rank)
+            .limit(num_results)
+            .select(K.DOCUMENT, K.SCORE)
+        )
+
+        # Execute hybrid search
+        try:
+            results = collection.hybrid_search(search)
+        except Exception as e:
+            # If hybrid_search fails, it might be due to API incompatibility
+            raise RuntimeError(f"ChromaDB hybrid_search failed: {e}") from e
+
+        # Convert results to Data objects
+        # ChromaDB returns results in format: {"documents": [[...]], "ids": [[...]], "metadatas": [[...]], "distances": [[...]]}
+        data_list = []
+        
+        # Handle nested list structure (ChromaDB returns lists of lists)
+        documents = results.get("documents", [])
+        ids = results.get("ids", [])
+        metadatas = results.get("metadatas", [])
+        distances = results.get("distances", [])
+        scores = results.get("scores", distances)  # Use distances as scores if scores not available
+
+        # Flatten nested structure if needed
+        if documents and isinstance(documents[0], list):
+            documents = documents[0]
+        if ids and isinstance(ids[0], list):
+            ids = ids[0]
+        if metadatas and isinstance(metadatas[0], list):
+            metadatas = metadatas[0]
+        if scores and isinstance(scores[0], list):
+            scores = scores[0]
+
+        # Convert distances to similarity scores (ChromaDB returns distances, lower is better)
+        # For cosine similarity, convert distance to score: score = 1 - distance
+        if scores and len(scores) > 0:
+            # Check if these are distances (values typically 0-2 for cosine) or scores
+            max_val = max(scores) if scores else 1.0
+            if max_val > 1.0:
+                # Likely distances, convert to scores
+                scores = [1.0 - d if d <= 1.0 else 0.0 for d in scores]
+
+        for i, doc in enumerate(documents):
+            doc_id = ids[i] if ids and i < len(ids) else None
+            metadata = metadatas[i] if metadatas and i < len(metadatas) else {}
+            score = scores[i] if scores and i < len(scores) else None
+
+            data_dict = {
+                "text": doc,
+            }
+            if metadata:
+                data_dict.update(metadata)
+            if doc_id:
+                data_dict["id"] = doc_id
+            if score is not None:
+                data_dict["score"] = float(score)
+
+            data_list.append(Data(**data_dict))
+
+        self.status = data_list
+        return data_list
+
+    def _ensemble_retriever_hybrid_search(self, vector_store: Chroma, query: str) -> list[Data]:
+        """Fallback hybrid search using EnsembleRetriever with BM25Retriever."""
+        try:
+            from langchain.retrievers import BM25Retriever, EnsembleRetriever
+            from langchain_core.documents import Document
+        except ImportError as e:
+            msg = "EnsembleRetriever hybrid search requires langchain package. Please install it with `pip install langchain`."
+            raise ImportError(msg) from e
+
+        # Get weights
+        vector_weight = float(getattr(self, "vector_weight", 0.7))
+        keyword_weight = float(getattr(self, "keyword_weight", 0.3))
+        num_results = int(self.number_of_results)
+
+        # Normalize weights
+        total_weight = vector_weight + keyword_weight
+        if total_weight > 0:
+            vector_weight = vector_weight / total_weight
+            keyword_weight = keyword_weight / total_weight
+
+        # Get documents from Chroma for BM25 indexing
+        try:
+            chroma_results = vector_store.get(include=["documents", "metadatas"])
+            documents = []
+            for i, doc_text in enumerate(chroma_results.get("documents", [])):
+                metadata = chroma_results.get("metadatas", [{}])[i] if chroma_results.get("metadatas") else {}
+                documents.append(Document(page_content=doc_text, metadata=metadata))
+        except Exception as e:
+            self.log(f"Error retrieving documents for BM25: {e}. Using vector search only.")
+            return self.search_with_vector_store(query, self.search_type, vector_store, k=num_results)
+
+        if not documents:
+            self.log("No documents found in vector store.")
+            return []
+
+        # Build BM25 retriever
+        try:
+            bm25_retriever = BM25Retriever.from_documents(documents, k=num_results)
+        except Exception as e:
+            self.log(f"Error building BM25 retriever: {e}. Using vector search only.")
+            return self.search_with_vector_store(query, self.search_type, vector_store, k=num_results)
+
+        # Build vector retriever
+        vector_retriever = vector_store.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": num_results},
+        )
+
+        # Combine retrievers
+        ensemble = EnsembleRetriever(
+            retrievers=[vector_retriever, bm25_retriever],
+            weights=[vector_weight, keyword_weight],
+        )
+
+        # Perform hybrid search
+        try:
+            docs = ensemble.invoke(query)
+            data_list = docs_to_data(docs)
+            self.status = data_list
+            return data_list
+        except Exception as e:
+            self.log(f"Error in ensemble retriever search: {e}. Falling back to vector search.")
+            return self.search_with_vector_store(query, self.search_type, vector_store, k=num_results)

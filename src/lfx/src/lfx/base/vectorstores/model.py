@@ -30,6 +30,12 @@ def check_cached_vector_store(f):
         if should_cache and self._cached_vector_store is not None:
             return self._cached_vector_store
 
+        # Clean up any existing cached vector store before creating a new one
+        # This prevents file handle leaks when components are rebuilt
+        if self._cached_vector_store is not None:
+            if hasattr(self, "_cleanup_chroma_connection"):
+                self._cleanup_chroma_connection(self._cached_vector_store)
+
         result = f(self, *args, **kwargs)
         self._cached_vector_store = result
         return result
@@ -53,6 +59,63 @@ class LCVectorStoreComponent(Component):
                     "must be decorated with @check_cached_vector_store"
                 )
                 raise TypeError(msg)
+
+    def _cleanup_chroma_connection(self, vector_store: VectorStore) -> None:
+        """Clean up ChromaDB connections to prevent file handle leaks.
+        
+        ChromaDB uses SQLite under the hood which can hold file handles.
+        This method attempts to close these connections properly.
+        """
+        if vector_store is None:
+            return
+        
+        try:
+            # Try to access the underlying ChromaDB client
+            if hasattr(vector_store, "_client") and vector_store._client is not None:
+                client = vector_store._client
+                # Try to stop/reset the client if methods exist
+                if hasattr(client, "stop"):
+                    try:
+                        client.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                elif hasattr(client, "reset"):
+                    try:
+                        client.reset()
+                    except Exception:  # noqa: BLE001
+                        pass
+                elif hasattr(client, "close"):
+                    try:
+                        client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            
+            # Try to access the collection and close it
+            if hasattr(vector_store, "_collection") and vector_store._collection is not None:
+                collection = vector_store._collection
+                # Some ChromaDB versions have cleanup methods on collections
+                if hasattr(collection, "close"):
+                    try:
+                        collection.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001
+            # Silently fail - cleanup is best effort
+            pass
+
+    def cleanup_vector_store(self) -> None:
+        """Clean up the cached vector store and release resources."""
+        if self._cached_vector_store is not None:
+            self._cleanup_chroma_connection(self._cached_vector_store)
+            self._cached_vector_store = None
+
+    def __del__(self):
+        """Destructor to ensure cleanup happens even if explicit cleanup isn't called."""
+        try:
+            self.cleanup_vector_store()
+        except Exception:  # noqa: BLE001
+            # Silently fail during destruction
+            pass
 
     trace_type = "retriever"
 
@@ -184,6 +247,16 @@ class LCVectorStoreComponent(Component):
     def get_retriever_kwargs(self):
         """Get the retriever kwargs. Implementations can override this method to provide custom retriever kwargs."""
         return {}
+
+    def _finalize_results(self, results, artifacts):
+        """Override to add cleanup after component execution."""
+        # Clean up vector store connections after build completes
+        # This prevents file handle accumulation during flow building
+        if hasattr(self, "should_cache_vector_store") and not getattr(self, "should_cache_vector_store", True):
+            # If caching is disabled, clean up immediately
+            self.cleanup_vector_store()
+        # Call parent finalization
+        super()._finalize_results(results, artifacts)
 
     @abstractmethod
     @check_cached_vector_store

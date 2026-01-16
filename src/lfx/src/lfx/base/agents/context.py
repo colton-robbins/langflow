@@ -5,6 +5,7 @@ from langchain_core.language_models import BaseLanguageModel, BaseLLM
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
+from lfx.base.models.model import deduplicate_tools
 from lfx.field_typing import LanguageModel
 from lfx.schema.data import Data
 
@@ -80,7 +81,11 @@ class AgentContext(BaseModel):
 
     def model_post_init(self, _context: Any) -> None:
         if hasattr(self.llm, "bind_tools"):
-            self.llm = self.llm.bind_tools(self.tools.values())
+            # Deduplicate tools before binding to prevent validation errors
+            # (e.g., AWS Bedrock ConverseStream throws ValidationException for duplicate tool names)
+            tools_list = list(self.tools.values())
+            deduplicated_tools = deduplicate_tools(tools_list)
+            self.llm = self.llm.bind_tools(deduplicated_tools)
         if self.context:
             self.update_context("Initial Context", self.context)
 

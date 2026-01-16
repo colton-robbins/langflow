@@ -7,6 +7,8 @@ from langchain_core.tools import BaseTool
 from smolagents import Model, Tool
 from smolagents.models import ChatMessage, ChatMessageToolCall, ChatMessageToolCallDefinition
 
+from lfx.base.models.model import deduplicate_tools
+
 
 def _lc_tool_call_to_hf_tool_call(tool_call: ToolCall) -> ChatMessageToolCall:
     """Convert a LangChain ToolCall to a Hugging Face ChatMessageToolCall.
@@ -100,6 +102,9 @@ class LangChainHFModel(Model):
         # Convert tools to LangChain tools
         if tools_to_call_from:
             tools_to_call_from = [_hf_tool_to_lc_tool(tool) for tool in tools_to_call_from]
+            # Deduplicate tools before binding to prevent validation errors
+            # (e.g., AWS Bedrock ConverseStream throws ValidationException for duplicate tool names)
+            tools_to_call_from = deduplicate_tools(tools_to_call_from)
 
         model = self.chat_model.bind_tools(tools_to_call_from) if tools_to_call_from else self.chat_model
 

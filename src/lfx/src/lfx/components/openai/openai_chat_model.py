@@ -32,6 +32,17 @@ class OpenAIModelComponent(LCModelComponent):
             advanced=True,
             info="Additional keyword arguments to pass to the model.",
         ),
+        DropdownInput(
+            name="service_tier",
+            display_name="Service Tier",
+            options=["inherit", "default", "priority"],
+            value="inherit",
+            advanced=True,
+            info=(
+                "OpenAI service tier for this request. Set to 'priority' for Priority Processing (lower latency, "
+                "higher cost). 'inherit' uses your OpenAI project default."
+            ),
+        ),
         BoolInput(
             name="json_mode",
             display_name="JSON Mode",
@@ -112,6 +123,15 @@ class OpenAIModelComponent(LCModelComponent):
             logger.warning("api_key found in model_kwargs, removing to prevent conflicts")
             model_kwargs = dict(model_kwargs)  # Make a copy
             del model_kwargs["api_key"]
+
+        # OpenAI Priority Processing / service tier (per-request)
+        # Prefer the explicit field over any value set in model_kwargs.
+        service_tier = getattr(self, "service_tier", None)
+        if service_tier and service_tier != "inherit":
+            if not isinstance(model_kwargs, dict):
+                model_kwargs = {}
+            model_kwargs = dict(model_kwargs)
+            model_kwargs["service_tier"] = service_tier
 
         parameters = {
             "api_key": api_key_value,

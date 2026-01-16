@@ -2,11 +2,13 @@ import importlib
 import json
 import warnings
 from abc import abstractmethod
+from collections.abc import Sequence
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.llms import LLM
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import BaseOutputParser
+from langchain_core.tools import BaseTool
 
 from lfx.base.constants import STREAM_INFO_TEXT
 from lfx.custom.custom_component.component import Component
@@ -20,6 +22,45 @@ from lfx.utils.constants import MESSAGE_SENDER_AI
 #
 # Models are trained with this exact string. Do not update.
 DETAILED_THINKING_PREFIX = "detailed thinking on\n\n"
+
+
+def deduplicate_tools(tools: Sequence[BaseTool]) -> list[BaseTool]:
+    """Deduplicate tools by name to prevent duplicate tool errors in model bindings.
+    
+    Some models (like AWS Bedrock ConverseStream) throw validation errors when
+    duplicate tool names are present in the tool configuration. This function
+    ensures each tool name appears only once, keeping the first occurrence.
+    
+    Args:
+        tools: Sequence of tools that may contain duplicates
+        
+    Returns:
+        List of deduplicated tools, preserving order of first occurrence
+    """
+    if not tools:
+        return []
+    
+    seen_names = set()
+    deduplicated = []
+    
+    for tool in tools:
+        # Get tool name - tools can have 'name' attribute or be callable
+        tool_name = None
+        if hasattr(tool, "name"):
+            tool_name = tool.name
+        elif hasattr(tool, "__name__"):
+            tool_name = tool.__name__
+        elif callable(tool):
+            tool_name = getattr(tool, "__name__", str(tool))
+        else:
+            tool_name = str(tool)
+        
+        # Only add if we haven't seen this name before
+        if tool_name not in seen_names:
+            seen_names.add(tool_name)
+            deduplicated.append(tool)
+    
+    return deduplicated
 
 
 class LCModelComponent(Component):

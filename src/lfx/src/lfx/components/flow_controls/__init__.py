@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING, Any
 from lfx.components._importing import import_mod
 
 if TYPE_CHECKING:
+    from lfx.components.flow_controls.clickhouse_success_gate import ClickHouseSuccessGateComponent
     from lfx.components.flow_controls.conditional_router import ConditionalRouterComponent
     from lfx.components.flow_controls.data_conditional_router import DataConditionalRouterComponent
     from lfx.components.flow_controls.flow_tool import FlowToolComponent
+    from lfx.components.flow_controls.keyword_checker import KeywordCheckerComponent
     from lfx.components.flow_controls.listen import ListenComponent
     from lfx.components.flow_controls.loop import LoopComponent
     from lfx.components.flow_controls.notify import NotifyComponent
@@ -16,9 +18,11 @@ if TYPE_CHECKING:
     from lfx.components.flow_controls.sub_flow import SubFlowComponent
 
 _dynamic_imports = {
+    "ClickHouseSuccessGateComponent": "clickhouse_success_gate",
     "ConditionalRouterComponent": "conditional_router",
     "DataConditionalRouterComponent": "data_conditional_router",
     "FlowToolComponent": "flow_tool",
+    "KeywordCheckerComponent": "keyword_checker",
     "ListenComponent": "listen",
     "LoopComponent": "loop",
     "NotifyComponent": "notify",
@@ -28,9 +32,11 @@ _dynamic_imports = {
 }
 
 __all__ = [
+    "ClickHouseSuccessGateComponent",
     "ConditionalRouterComponent",
     "DataConditionalRouterComponent",
     "FlowToolComponent",
+    "KeywordCheckerComponent",
     "ListenComponent",
     "LoopComponent",
     "NotifyComponent",

@@ -17,6 +17,12 @@ class AmazonBedrockComponent(LCModelComponent):
     legacy = True
     replacement = "amazon.AmazonBedrockConverseModel"
 
+    def __init__(self, **kwargs):
+        """Initialize the component and create caches for boto3 session and client."""
+        super().__init__(**kwargs)
+        self._cached_boto3_session = None
+        self._cached_boto3_client = None
+
     inputs = [
         *LCModelComponent.get_base_inputs(),
         DropdownInput(
@@ -24,7 +30,8 @@ class AmazonBedrockComponent(LCModelComponent):
             display_name="Model ID",
             options=AWS_MODEL_IDs,
             value="anthropic.claude-3-haiku-20240307-v1:0",
-            info="List of available model IDs to choose from.",
+            combobox=True,
+            info="List of available model IDs. You can also type a custom model ID (e.g., cross-region inference models).",
         ),
         SecretStrInput(
             name="aws_access_key_id",
@@ -93,20 +100,25 @@ class AmazonBedrockComponent(LCModelComponent):
         except ImportError as e:
             msg = "boto3 is not installed. Please install it with `pip install boto3`."
             raise ImportError(msg) from e
-        if self.aws_access_key_id or self.aws_secret_access_key:
-            try:
-                session = boto3.Session(
-                    aws_access_key_id=self.aws_access_key_id,
-                    aws_secret_access_key=self.aws_secret_access_key,
-                    aws_session_token=self.aws_session_token,
-                )
-            except Exception as e:
-                msg = "Could not create a boto3 session."
-                raise ValueError(msg) from e
-        elif self.credentials_profile_name:
-            session = boto3.Session(profile_name=self.credentials_profile_name)
-        else:
-            session = boto3.Session()
+        
+        # Cache boto3 session to avoid creating multiple sessions
+        if self._cached_boto3_session is None:
+            if self.aws_access_key_id or self.aws_secret_access_key:
+                try:
+                    self._cached_boto3_session = boto3.Session(
+                        aws_access_key_id=self.aws_access_key_id,
+                        aws_secret_access_key=self.aws_secret_access_key,
+                        aws_session_token=self.aws_session_token,
+                    )
+                except Exception as e:
+                    msg = "Could not create a boto3 session."
+                    raise ValueError(msg) from e
+            elif self.credentials_profile_name:
+                self._cached_boto3_session = boto3.Session(profile_name=self.credentials_profile_name)
+            else:
+                self._cached_boto3_session = boto3.Session()
+        
+        session = self._cached_boto3_session
 
         client_params = {}
         if self.endpoint_url:
@@ -114,7 +126,12 @@ class AmazonBedrockComponent(LCModelComponent):
         if self.region_name:
             client_params["region_name"] = self.region_name
 
-        boto3_client = session.client("bedrock-runtime", **client_params)
+        # Cache boto3 client to avoid creating multiple clients
+        if self._cached_boto3_client is None:
+            self._cached_boto3_client = session.client("bedrock-runtime", **client_params)
+        
+        boto3_client = self._cached_boto3_client
+        
         try:
             output = ChatBedrock(
                 client=boto3_client,

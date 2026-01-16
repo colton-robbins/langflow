@@ -41,11 +41,16 @@ class S3BucketUploaderComponent(Component):
             path being uploaded.
         _s3_client() -> Any:
             Creates and returns an S3 client using the provided AWS access key ID and secret
-            access key.
+            access key. Caches the client to avoid creating multiple clients.
 
         Please note that this component requires the boto3 library to be installed. It is designed
         to work with File and Director components as inputs
     """
+
+    def __init__(self, **kwargs):
+        """Initialize the component and create a cache for the S3 client."""
+        super().__init__(**kwargs)
+        self._cached_s3_client = None
 
     display_name = "S3 Bucket Uploader"
     description = "Uploads files to S3 bucket."
@@ -169,21 +174,27 @@ class S3BucketUploaderComponent(Component):
 
     def _s3_client(self) -> Any:
         """Creates and returns an S3 client using the provided AWS access key ID and secret access key.
+        
+        Caches the client to avoid creating multiple clients and prevent file descriptor leaks.
 
         Returns:
             Any: A boto3 S3 client instance.
         """
+        if self._cached_s3_client is not None:
+            return self._cached_s3_client
+        
         try:
             import boto3
         except ImportError as e:
             msg = "boto3 is not installed. Please install it using `uv pip install boto3`."
             raise ImportError(msg) from e
 
-        return boto3.client(
+        self._cached_s3_client = boto3.client(
             "s3",
             aws_access_key_id=self.aws_access_key_id,
             aws_secret_access_key=self.aws_secret_access_key,
         )
+        return self._cached_s3_client
 
     def _normalize_path(self, file_path) -> str:
         """Process the file path based on the s3_prefix and path_as_prefix.

@@ -11,6 +11,12 @@ class AmazonBedrockEmbeddingsComponent(LCModelComponent):
     icon = "Amazon"
     name = "AmazonBedrockEmbeddings"
 
+    def __init__(self, **kwargs):
+        """Initialize the component and create caches for boto3 session and client."""
+        super().__init__(**kwargs)
+        self._cached_boto3_session = None
+        self._cached_boto3_client = None
+
     inputs = [
         DropdownInput(
             name="model_id",
@@ -82,16 +88,21 @@ class AmazonBedrockEmbeddingsComponent(LCModelComponent):
         except ImportError as e:
             msg = "boto3 is not installed. Please install it with `pip install boto3`."
             raise ImportError(msg) from e
-        if self.aws_access_key_id or self.aws_secret_access_key:
-            session = boto3.Session(
-                aws_access_key_id=self.aws_access_key_id,
-                aws_secret_access_key=self.aws_secret_access_key,
-                aws_session_token=self.aws_session_token,
-            )
-        elif self.credentials_profile_name:
-            session = boto3.Session(profile_name=self.credentials_profile_name)
-        else:
-            session = boto3.Session()
+        
+        # Cache boto3 session to avoid creating multiple sessions
+        if self._cached_boto3_session is None:
+            if self.aws_access_key_id or self.aws_secret_access_key:
+                self._cached_boto3_session = boto3.Session(
+                    aws_access_key_id=self.aws_access_key_id,
+                    aws_secret_access_key=self.aws_secret_access_key,
+                    aws_session_token=self.aws_session_token,
+                )
+            elif self.credentials_profile_name:
+                self._cached_boto3_session = boto3.Session(profile_name=self.credentials_profile_name)
+            else:
+                self._cached_boto3_session = boto3.Session()
+        
+        session = self._cached_boto3_session
 
         client_params = {}
         if self.endpoint_url:
@@ -99,7 +110,12 @@ class AmazonBedrockEmbeddingsComponent(LCModelComponent):
         if self.region_name:
             client_params["region_name"] = self.region_name
 
-        boto3_client = session.client("bedrock-runtime", **client_params)
+        # Cache boto3 client to avoid creating multiple clients
+        if self._cached_boto3_client is None:
+            self._cached_boto3_client = session.client("bedrock-runtime", **client_params)
+        
+        boto3_client = self._cached_boto3_client
+        
         return BedrockEmbeddings(
             credentials_profile_name=self.credentials_profile_name,
             client=boto3_client,

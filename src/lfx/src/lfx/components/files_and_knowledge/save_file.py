@@ -32,6 +32,11 @@ class SaveToFileComponent(Component):
     icon = "file-text"
     name = "SaveToFile"
 
+    def __init__(self, **kwargs):
+        """Initialize the component and create a cache for the S3 client."""
+        super().__init__(**kwargs)
+        self._cached_s3_client = None
+
     # File format options for different storage types
     LOCAL_DATA_FORMAT_CHOICES = ["csv", "excel", "json", "markdown"]
     LOCAL_MESSAGE_FORMAT_CHOICES = ["txt", "json", "markdown"]
@@ -605,20 +610,24 @@ class SaveToFileComponent(Component):
             msg = "boto3 is not installed. Please install it using `uv pip install boto3`."
             raise ImportError(msg) from e
 
-        # Create S3 client
-        client_config: dict[str, Any] = {
-            "aws_access_key_id": str(aws_access_key_id),
-            "aws_secret_access_key": str(aws_secret_access_key),
-        }
+        # Cache S3 client to avoid creating multiple clients
+        if self._cached_s3_client is None:
+            # Create S3 client
+            client_config: dict[str, Any] = {
+                "aws_access_key_id": str(aws_access_key_id),
+                "aws_secret_access_key": str(aws_secret_access_key),
+            }
 
-        # Get region from component input, environment variable, or settings
-        aws_region = getattr(self, "aws_region", None)
-        if not aws_region:
-            aws_region = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION")
-        if aws_region:
-            client_config["region_name"] = str(aws_region)
+            # Get region from component input, environment variable, or settings
+            aws_region = getattr(self, "aws_region", None)
+            if not aws_region:
+                aws_region = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION")
+            if aws_region:
+                client_config["region_name"] = str(aws_region)
 
-        s3_client = boto3.client("s3", **client_config)
+            self._cached_s3_client = boto3.client("s3", **client_config)
+        
+        s3_client = self._cached_s3_client
 
         # Extract content
         content = self._extract_content_for_upload()

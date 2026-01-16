@@ -70,12 +70,28 @@ const useSaveFlow = () => {
             endpoint_name,
             locked,
           } = flow;
-          if (!currentSavedFlow?.data?.nodes.length || data!.nodes.length > 0) {
+          
+          // Ensure data exists and has nodes before accessing properties
+          const currentSavedNodesLength = currentSavedFlow?.data?.nodes?.length ?? 0;
+          const dataNodesLength = data?.nodes?.length ?? 0;
+          
+          if (!currentSavedNodesLength || dataNodesLength > 0) {
+            // Ensure data is not null before sending to API
+            if (!data) {
+              setErrorData({
+                title: "Failed to save flow",
+                list: ["Flow data is missing"],
+              });
+              setSaveLoading(false);
+              reject(new Error("Flow data is missing"));
+              return;
+            }
+            
             mutate(
               {
                 id,
                 name,
-                data: data!,
+                data,
                 description,
                 folder_id,
                 endpoint_name,

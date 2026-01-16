@@ -220,6 +220,26 @@ class ComponentToolkit:
             name = f"{output.method}".strip(".")
             formatted_name = _format_tool_name(name)
             event_manager = self.component.get_event_manager()
+            
+            # Build metadata with component info for easier access
+            metadata = {
+                "display_name": formatted_name,
+                "display_description": build_description(self.component),
+            }
+            
+            # Store component-specific info in metadata (e.g., persist_directory for Chroma)
+            component_info = {}
+            if hasattr(self.component, "persist_directory"):
+                persist_dir = getattr(self.component, "persist_directory", None)
+                if persist_dir:
+                    component_info["persist_directory"] = persist_dir
+            if hasattr(self.component, "collection_name"):
+                collection = getattr(self.component, "collection_name", None)
+                if collection:
+                    component_info["collection_name"] = collection
+            if component_info:
+                metadata["component_info"] = component_info
+            
             if asyncio.iscoroutinefunction(output_method):
                 tools.append(
                     StructuredTool(
@@ -230,10 +250,7 @@ class ComponentToolkit:
                         handle_tool_error=True,
                         callbacks=callbacks,
                         tags=[formatted_name],
-                        metadata={
-                            "display_name": formatted_name,
-                            "display_description": build_description(self.component),
-                        },
+                        metadata=metadata,
                     )
                 )
             else:
@@ -246,10 +263,7 @@ class ComponentToolkit:
                         handle_tool_error=True,
                         callbacks=callbacks,
                         tags=[formatted_name],
-                        metadata={
-                            "display_name": formatted_name,
-                            "display_description": build_description(self.component),
-                        },
+                        metadata=metadata,
                     )
                 )
         if len(tools) == 1 and (tool_name or tool_description):

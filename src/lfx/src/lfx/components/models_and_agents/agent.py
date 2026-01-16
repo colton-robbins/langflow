@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -13,22 +14,92 @@ if TYPE_CHECKING:
 
 from lfx.base.agents.agent import LCToolsAgentComponent
 from lfx.base.agents.events import ExceptionWithMessageError
-from lfx.base.models.unified_models import (
-    get_language_model_options,
-    get_llm,
-    update_model_options_in_build_config,
-)
 from lfx.components.helpers import CurrentDateComponent
 from lfx.components.langchain_utilities.tool_calling import ToolCallingAgentComponent
 from lfx.custom.custom_component.component import get_component_toolkit
 from lfx.helpers.base_model import build_model_from_schema
-from lfx.inputs.inputs import BoolInput, ModelInput
-from lfx.io import IntInput, MessageTextInput, MultilineInput, Output, SecretStrInput, TableInput
+from lfx.io import BoolInput, HandleInput, IntInput, MessageTextInput, MultilineInput, Output, SecretStrInput, TableInput
 from lfx.log.logger import logger
 from lfx.schema.data import Data
 from lfx.schema.dotdict import dotdict
 from lfx.schema.message import Message
 from lfx.schema.table import EditMode
+
+
+def sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match AWS Bedrock pattern: ^[a-zA-Z0-9_-]+$
+    
+    Replaces invalid characters (like $, spaces, etc.) with underscores.
+    
+    Args:
+        name: Original tool name
+        
+    Returns:
+        Sanitized tool name that matches the required pattern
+    """
+    if not name:
+        return "unnamed_tool"
+    
+    # Replace any non-alphanumeric characters (except _ and -) with underscores
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", str(name))
+    
+    # Ensure it starts with a letter or underscore (not a number or special char)
+    if sanitized and not sanitized[0].isalpha() and sanitized[0] != "_":
+        sanitized = f"tool_{sanitized}"
+    
+    # Remove consecutive underscores
+    sanitized = re.sub(r"_+", "_", sanitized)
+    
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip("_")
+    
+    return sanitized or "unnamed_tool"
+
+
+def deduplicate_tools(tools):
+    """Deduplicate tools by name to prevent duplicate tool errors in model bindings.
+    
+    Some models (like AWS Bedrock ConverseStream) throw validation errors when
+    duplicate tool names are present in the tool configuration. This function
+    ensures each tool name appears only once, keeping the first occurrence.
+    Also sanitizes tool names to ensure they match AWS Bedrock requirements.
+    
+    Args:
+        tools: Sequence of tools that may contain duplicates
+        
+    Returns:
+        List of deduplicated tools with sanitized names, preserving order of first occurrence
+    """
+    if not tools:
+        return []
+    
+    seen_names = set()
+    deduplicated = []
+    
+    for tool in tools:
+        # Get tool name - tools can have 'name' attribute or be callable
+        tool_name = None
+        if hasattr(tool, "name"):
+            tool_name = tool.name
+        elif hasattr(tool, "__name__"):
+            tool_name = tool.__name__
+        elif callable(tool):
+            tool_name = getattr(tool, "__name__", str(tool))
+        else:
+            tool_name = str(tool)
+        
+        # Sanitize the tool name to ensure it matches AWS Bedrock requirements
+        sanitized_name = sanitize_tool_name(tool_name)
+        
+        # Only add if we haven't seen this sanitized name before
+        if sanitized_name not in seen_names:
+            seen_names.add(sanitized_name)
+            # Update the tool's name to the sanitized version
+            if hasattr(tool, "name"):
+                tool.name = sanitized_name
+            deduplicated.append(tool)
+    
+    return deduplicated
 
 
 def set_advanced_true(component_input):
@@ -47,11 +118,11 @@ class AgentComponent(ToolCallingAgentComponent):
     memory_inputs = [set_advanced_true(component_input) for component_input in MemoryComponent().inputs]
 
     inputs = [
-        ModelInput(
+        HandleInput(
             name="model",
             display_name="Language Model",
-            info="Select your model provider",
-            real_time_refresh=True,
+            info="Connect a Language Model component",
+            input_types=["LanguageModel"],
             required=True,
         ),
         SecretStrInput(
@@ -159,17 +230,216 @@ class AgentComponent(ToolCallingAgentComponent):
         Output(name="response", display_name="Response", method="message_response"),
     ]
 
+    def _get_tool_name_mapping(self) -> dict[str, str]:
+        """Get a mapping of old tool names to new tool names.
+        
+        Override this method in a subclass to rename tools. Return a dictionary
+        where keys are the original tool names and values are the new names.
+        
+        This will rename ALL tools with the same old name to the same new name.
+        If you have multiple tools with the same method name, they will all be
+        renamed to the same new name.
+        
+        Example:
+            return {
+                "SEARCH_DOCUMENTS": "scaffold_search",
+                "AS_DATAFRAME": "scaffold_get_dataframe"
+            }
+        
+        Returns:
+            dict[str, str]: Mapping of old_name -> new_name
+        """
+        return {}
+
+    def _extract_component_info_from_tool(self, tool: Tool) -> dict | None:
+        """Extract component information from a tool.
+        
+        Attempts to extract component attributes (like persist_directory) from the
+        tool's function closure or metadata. This is useful for Chroma DB tools
+        where we want to use the persist_directory in the tool name.
+        
+        Args:
+            tool: The tool object
+            
+        Returns:
+            dict | None: Dictionary with component info (e.g., {'persist_directory': '...'})
+                        or None if info cannot be extracted
+        """
+        # First, check if component info is stored in metadata
+        if hasattr(tool, "metadata") and tool.metadata:
+            component_info = tool.metadata.get("component_info")
+            if component_info:
+                return component_info
+        
+        # Try to extract from function closure
+        # The tool's func/coroutine wraps the component method
+        func = getattr(tool, "func", None) or getattr(tool, "coroutine", None)
+        if func:
+            try:
+                # Try to access closure variables
+                if hasattr(func, "__closure__") and func.__closure__:
+                    for cell in func.__closure__:
+                        if cell.cell_contents:
+                            obj = cell.cell_contents
+                            # Check if it's a Component instance
+                            from lfx.custom.custom_component.component import Component
+                            if isinstance(obj, Component):
+                                info = {}
+                                # Extract persist_directory if it exists
+                                if hasattr(obj, "persist_directory"):
+                                    persist_dir = getattr(obj, "persist_directory", None)
+                                    if persist_dir:
+                                        info["persist_directory"] = persist_dir
+                                # Extract collection_name if it exists
+                                if hasattr(obj, "collection_name"):
+                                    collection = getattr(obj, "collection_name", None)
+                                    if collection:
+                                        info["collection_name"] = collection
+                                if info:
+                                    return info
+            except Exception:
+                # If extraction fails, continue without component info
+                pass
+        
+        return None
+
+    def _get_tool_name_for_index(self, tool: Tool, index: int, original_name: str) -> str | None:
+        """Get a specific name for a tool based on its position/index.
+        
+        Override this method to provide custom names for each tool individually.
+        This method is called for each tool in order, allowing you to set specific
+        names based on the tool's position in the list.
+        
+        By default, this method will try to use persist_directory from Chroma DB
+        components if available.
+        
+        Args:
+            tool: The tool object being renamed
+            index: Zero-based index of the tool in the tools list
+            original_name: The original name of the tool
+            
+        Returns:
+            str | None: The new name for this tool, or None to use default renaming
+            
+        Example:
+            def _get_tool_name_for_index(self, tool, index, original_name):
+                # Use persist_directory if available
+                component_info = self._extract_component_info_from_tool(tool)
+                if component_info and "persist_directory" in component_info:
+                    persist_dir = component_info["persist_directory"]
+                    # Extract just the directory name or use full path
+                    dir_name = persist_dir.split("/")[-1] if persist_dir else None
+                    if dir_name:
+                        return f"search_{dir_name}"
+                return None
+        """
+        # Default implementation: try to use persist_directory for Chroma tools
+        component_info = self._extract_component_info_from_tool(tool)
+        if component_info and "persist_directory" in component_info:
+            persist_dir = component_info["persist_directory"]
+            if persist_dir:
+                from lfx.base.tools.component_tool import _format_tool_name
+                # Extract directory name from path
+                import os
+                dir_name = os.path.basename(persist_dir.rstrip("/\\"))
+                if dir_name:
+                    # Create name based on original tool name and directory
+                    base_name = original_name.lower().replace("_", "")
+                    new_name = f"{base_name}_{dir_name}"
+                    return _format_tool_name(new_name)
+        
+        return None
+
+    def _should_make_tool_names_unique(self) -> bool:
+        """Whether to add unique suffixes when multiple tools have the same name.
+        
+        Override this method to return True if you want tools with the same
+        old name to be renamed with unique suffixes (e.g., scaffold_search_1,
+        scaffold_search_2, etc.). Default is False, which means all tools
+        with the same old name will be renamed to the same new name.
+        
+        Returns:
+            bool: True to add unique suffixes, False to use the same name for all
+        """
+        return False
+
+    def _rename_tools(self, tools: list[Tool]) -> list[Tool]:
+        """Rename tools based on the name mapping or index-based naming.
+        
+        This method renames tools by updating their name, tags, and metadata
+        attributes. The renaming happens before tools are bound to the agent.
+        
+        The renaming follows this priority:
+        1. If _get_tool_name_for_index() returns a name, use that
+        2. Otherwise, use _get_tool_name_mapping() with optional unique suffixes
+        
+        Args:
+            tools: List of tools to potentially rename
+            
+        Returns:
+            List of tools with renamed tools updated
+        """
+        from lfx.base.tools.component_tool import _format_tool_name
+        
+        name_mapping = self._get_tool_name_mapping()
+        make_unique = self._should_make_tool_names_unique()
+        
+        # Track counts for each new name if we need unique names
+        new_name_counts: dict[str, int] = {}
+        
+        renamed_tools = []
+        for index, tool in enumerate(tools):
+            original_name = tool.name
+            new_name = None
+            
+            # First, try index-based naming (allows specific names for each tool)
+            custom_name = self._get_tool_name_for_index(tool, index, original_name)
+            if custom_name is not None:
+                new_name = custom_name
+            # Otherwise, use mapping-based naming
+            elif name_mapping and original_name in name_mapping:
+                base_new_name = name_mapping[original_name]
+                
+                # Add suffix if we need unique names
+                if make_unique:
+                    count = new_name_counts.get(base_new_name, 0) + 1
+                    new_name_counts[base_new_name] = count
+                    # First occurrence keeps original name, subsequent ones get suffix
+                    new_name = base_new_name if count == 1 else f"{base_new_name}_{count}"
+                else:
+                    new_name = base_new_name
+            
+            # Apply the new name if we have one
+            if new_name:
+                formatted_new_name = _format_tool_name(new_name)
+                
+                # Update tool name
+                tool.name = formatted_new_name
+                
+                # Update tags (first tag is typically the tool name)
+                if tool.tags:
+                    tool.tags = [formatted_new_name] + tool.tags[1:]
+                else:
+                    tool.tags = [formatted_new_name]
+                
+                # Update metadata if present
+                if hasattr(tool, "metadata") and tool.metadata:
+                    tool.metadata["display_name"] = formatted_new_name
+                
+                logger.debug(f"Renamed tool '{original_name}' to '{formatted_new_name}' (index {index})")
+            
+            renamed_tools.append(tool)
+        
+        return renamed_tools
+
     async def get_agent_requirements(self):
         """Get the agent requirements for the agent."""
         from langchain_core.tools import StructuredTool
 
-        llm_model = get_llm(
-            model=self.model,
-            user_id=self.user_id,
-            api_key=self.api_key,
-        )
+        # With HandleInput, model is already a BaseLanguageModel instance
+        llm_model = self.model
         if llm_model is None:
-            msg = "No language model selected. Please choose a model to proceed."
+            msg = "No language model connected. Please connect a Language Model component to the model input."
             raise ValueError(msg)
 
         # Get memory data
@@ -188,6 +458,30 @@ class AgentComponent(ToolCallingAgentComponent):
                 msg = "CurrentDateComponent must be converted to a StructuredTool"
                 raise TypeError(msg)
             self.tools.append(current_date_tool)
+
+        # Deduplicate tools before binding to prevent validation errors
+        # (e.g., AWS Bedrock ConverseStream throws ValidationException for duplicate tool names)
+        if self.tools:
+            self.tools = deduplicate_tools(self.tools)
+
+        # Rename tools if custom renaming is configured
+        self.tools = self._rename_tools(self.tools)
+
+        # Final sanitization pass to ensure all tool names are valid for AWS Bedrock
+        # This catches any tools that might have invalid names after renaming
+        if self.tools:
+            for tool in self.tools:
+                if hasattr(tool, "name") and tool.name:
+                    sanitized_name = sanitize_tool_name(tool.name)
+                    if sanitized_name != tool.name:
+                        await logger.awarning(
+                            f"Tool name '{tool.name}' was sanitized to '{sanitized_name}' "
+                            "to match AWS Bedrock requirements (pattern: ^[a-zA-Z0-9_-]+$)"
+                        )
+                        tool.name = sanitized_name
+                        # Update tags if they match the old name
+                        if hasattr(tool, "tags") and tool.tags:
+                            tool.tags = [sanitized_name if tag == tool.name else tag for tag in tool.tags]
 
         # Set shared callbacks for tracing the tools used by the agent
         self.set_tools_callbacks(self.tools, self._get_shared_callbacks())
@@ -434,45 +728,11 @@ class AgentComponent(ToolCallingAgentComponent):
         field_value: list[dict],
         field_name: str | None = None,
     ) -> dotdict:
-        # Update model options with caching (for all field changes)
-        # Agents require tool calling, so filter for only tool-calling capable models
-        def get_tool_calling_model_options(user_id=None):
-            return get_language_model_options(user_id=user_id, tool_calling=True)
-
-        build_config = update_model_options_in_build_config(
-            component=self,
-            build_config=dict(build_config),
-            cache_key_prefix="language_model_options_tool_calling",
-            get_options_func=get_tool_calling_model_options,
-            field_name=field_name,
-            field_value=field_value,
-        )
-        build_config = dotdict(build_config)
-
-        # Iterate over all providers in the MODEL_PROVIDERS_DICT
-        if field_name == "model":
-            self.log(str(field_value))
-            # Update input types for all fields
-            build_config = self.update_input_types(build_config)
-
-            # Validate required keys
-            default_keys = [
-                "code",
-                "_type",
-                "model",
-                "tools",
-                "input_value",
-                "add_current_date_tool",
-                "system_prompt",
-                "agent_description",
-                "max_iterations",
-                "handle_parsing_errors",
-                "verbose",
-            ]
-            missing_keys = [key for key in default_keys if key not in build_config]
-            if missing_keys:
-                msg = f"Missing required keys in build_config: {missing_keys}"
-                raise ValueError(msg)
+        # With HandleInput, no dynamic model options needed
+        # Model is connected via handle from Language Model component
+        
+        # Update input types for all fields
+        build_config = self.update_input_types(build_config)
 
         return dotdict({k: v.to_dict() if hasattr(v, "to_dict") else v for k, v in build_config.items()})
 

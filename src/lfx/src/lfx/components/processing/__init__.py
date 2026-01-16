@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from lfx.components.processing.parse_data import ParseDataComponent
     from lfx.components.processing.parser import ParserComponent
     from lfx.components.processing.regex import RegexExtractorComponent
+    from lfx.components.processing.split_csv_by_row import SplitCSVByRowComponent
     from lfx.components.processing.split_text import SplitTextComponent
     from lfx.components.processing.store_message import MessageStoreComponent
 
@@ -33,6 +34,7 @@ _dynamic_imports = {
     "ParseDataComponent": "parse_data",
     "ParserComponent": "parser",
     "RegexExtractorComponent": "regex",
+    "SplitCSVByRowComponent": "split_csv_by_row",
     "SplitTextComponent": "split_text",
     "MessageStoreComponent": "store_message",
 }
@@ -49,6 +51,7 @@ __all__ = [
     "ParseDataComponent",
     "ParserComponent",
     "RegexExtractorComponent",
+    "SplitCSVByRowComponent",
     "SplitTextComponent",
     "TypeConverterComponent",
 ]

@@ -6,13 +6,16 @@ from lfx.components._importing import import_mod
 
 if TYPE_CHECKING:
     from .chroma import ChromaVectorStoreComponent
+    from .chroma_search_agent import ChromaSearchAgentComponent
 
 _dynamic_imports = {
     "ChromaVectorStoreComponent": "chroma",
+    "ChromaSearchAgentComponent": "chroma_search_agent",
 }
 
 __all__ = [
     "ChromaVectorStoreComponent",
+    "ChromaSearchAgentComponent",
 ]
 
 

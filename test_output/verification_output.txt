@@ -1,0 +1,85 @@
+======================================================================
+DEMONSTRATING THE FIX FOR CSV SPLIT BY ROW
+======================================================================
+
+Input Data Structure:
+--------------------
+Data(data={
+    'records': [
+        {'name': 'Alice', 'age': 30, 'city': 'NYC'},
+        {'name': 'Bob', 'age': 25, 'city': 'LA'},
+        {'name': 'Charlie', 'age': 35, 'city': 'Chicago'},
+    ]
+})
+
+
+======================================================================
+OLD APPROACH: DataFrame([data_obj])
+======================================================================
+
+Resulting DataFrame shape: (1, 1)
+Number of rows: 1
+
+DataFrame contents:
+                                             records
+0  [{'name': 'Alice', 'age': 30, 'city': 'NYC'}, ...
+
+DataFrame columns: ['records']
+
+PROBLEM: Only 1 row! The entire 'records' list is stored in a single cell.
+
+to_dict(orient='records') returns 1 record(s)
+First record: {'records': [{'name': 'Alice', 'age': 30, 'city': 'NYC'}, {'name': 'Bob', 'age': 25, 'city': 'LA'}, {'name': 'Charlie', 'age': 35, 'city': 'Chicago'}]}
+
+This is NOT what we want - we need 3 separate rows!
+
+
+======================================================================
+NEW APPROACH: data_obj.to_dataframe()
+======================================================================
+
+Resulting DataFrame shape: (3, 3)
+Number of rows: 3
+
+DataFrame contents:
+      name  age     city
+0    Alice   30      NYC
+1      Bob   25       LA
+2  Charlie   35  Chicago
+
+DataFrame columns: ['name', 'age', 'city']
+
+SUCCESS: 3 separate rows! Each CSV row is properly expanded.
+
+to_dict(orient='records') returns 3 records
+  Row 1: {'name': 'Alice', 'age': 30, 'city': 'NYC'}
+  Row 2: {'name': 'Bob', 'age': 25, 'city': 'LA'}
+  Row 3: {'name': 'Charlie', 'age': 35, 'city': 'Chicago'}
+
+
+======================================================================
+SUMMARY
+======================================================================
+OLD approach: 1 row (WRONG - nested structure not expanded)
+NEW approach: 3 rows (CORRECT - each CSV row is separate)
+
+The fix ensures CSV data is properly split into individual rows.
+======================================================================
+
+
+======================================================================
+BONUS: Single Row Still Works Correctly
+======================================================================
+
+Input: Single Data object (not nested)
+{'name': 'David', 'age': 40, 'city': 'Seattle'}
+
+Resulting DataFrame shape: (1, 3)
+    name  age     city
+0  David   40  Seattle
+
+SUCCESS: Single row data still works as expected!
+
+======================================================================
+VERIFICATION COMPLETE - FIX CONFIRMED WORKING
+======================================================================
