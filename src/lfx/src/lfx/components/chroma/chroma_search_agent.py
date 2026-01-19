@@ -26,6 +26,14 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
             show=True,
             value="",
         ),
+        MessageTextInput(
+            name="collection_name",
+            display_name="Collection Name",
+            info="Name of the Chroma collection to search. Must match the collection name used during ingestion.",
+            required=False,
+            show=True,
+            value="langflow",
+        ),
         QueryInput(
             name="search_query",
             display_name="Search Query",
@@ -95,9 +103,24 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
             msg = "Persist directory is required to connect to Chroma database."
             raise ValueError(msg)
 
+        # Get collection_name - handle both string and Message inputs
+        collection_name_value = self.collection_name
+        if isinstance(collection_name_value, str):
+            collection_name = collection_name_value
+        elif hasattr(collection_name_value, "text"):
+            # Handle Message objects
+            collection_name = str(collection_name_value.text)
+        elif hasattr(collection_name_value, "data") and isinstance(collection_name_value.data, dict):
+            # Handle Data objects
+            collection_name = str(collection_name_value.data.get("text", collection_name_value.data.get("content", str(collection_name_value))))
+        else:
+            collection_name = str(collection_name_value) if collection_name_value else "langflow"
+        
+        # Use default if empty
+        if not collection_name or not collection_name.strip():
+            collection_name = "langflow"
+
         # Build Chroma instance
-        # Use default collection name "langflow" if not specified
-        collection_name = getattr(self, "collection_name", "langflow")
         chroma = Chroma(
             persist_directory=persist_directory,
             client=None,
@@ -109,7 +132,6 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
         try:
             collection_info = chroma.get()
             num_docs = len(collection_info.get("ids", []))
-            collection_name = getattr(self, "collection_name", "langflow")
             self.log(f"Connected to Chroma DB at '{persist_directory}' (collection: '{collection_name}', documents: {num_docs})")
         except Exception as e:
             self.log(f"Warning: Could not retrieve collection info: {e}")
@@ -118,26 +140,9 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
 
     @override
     def search_documents(self) -> Message:
-        """Search for documents in the Chroma vector store and return category based on search results."""
-        # Define the exact category terms to search for
-        categories = [
-            "demographics",
-            "group_info",
-            "medical_claim",
-            "j_code",
-            "medical_savings",
-            "pharm_and_phys",
-            "pharmacy_claim",
-            "opioid_and_benzo",
-            "pharmacy_savings",
-            "Clarification needed",
-        ]
-        
-        # Use the parent class's search mechanism (same as working component)
-        # This ensures compatibility and uses the proven search method
+        """Search for documents in the Chroma vector store and return search results."""
         try:
-            # Call parent's search_documents to get results
-            # First ensure vector store is built
+            # Ensure vector store is built
             if self._cached_vector_store is not None:
                 vector_store = self._cached_vector_store
             else:
@@ -148,14 +153,13 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
             search_query: str = self.search_query
             if not search_query:
                 self.status = "No search query provided."
-                return Message(text="Clarification needed")
+                return Message(text="")
 
             self.log(f"Searching Chroma DB with query: '{search_query}'")
             self.log(f"Number of results requested: {self.number_of_results}")
 
             # Use Chroma's native similarity_search_with_score method
-            # This is the most reliable method for Chroma (langchain_chroma wrapper)
-            search_results = []
+            docs = []
             try:
                 if hasattr(vector_store, "similarity_search_with_score"):
                     docs_with_scores = vector_store.similarity_search_with_score(
@@ -168,20 +172,10 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
                     if not docs_with_scores:
                         self.log("No results found for the query.")
                         self.status = "No results found."
-                        return Message(text="Clarification needed")
+                        return Message(text="")
                     
                     # Extract documents from (doc, score) tuples
                     docs = [doc for doc, score in docs_with_scores]
-                    
-                    # Log document details for debugging
-                    for i, doc in enumerate(docs):
-                        page_content = doc.page_content if hasattr(doc, "page_content") else ""
-                        metadata = doc.metadata if hasattr(doc, "metadata") else {}
-                        self.log(f"Document {i+1}: page_content length={len(page_content)}, preview={page_content[:100]}, metadata={metadata}")
-                    
-                    # Convert documents to Data objects
-                    search_results = docs_to_data(docs)
-                    self.log(f"Converted to {len(search_results)} Data objects")
                     
                 elif hasattr(vector_store, "similarity_search"):
                     # Fallback: try similarity_search if similarity_search_with_score doesn't exist
@@ -192,26 +186,11 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
                     )
                     
                     self.log(f"Found {len(docs)} documents")
-                    
-                    if not docs:
-                        self.log("No results found for the query.")
-                        self.status = "No results found."
-                        return Message(text="Clarification needed")
-                    
-                    # Log document details for debugging
-                    for i, doc in enumerate(docs):
-                        page_content = doc.page_content if hasattr(doc, "page_content") else ""
-                        metadata = doc.metadata if hasattr(doc, "metadata") else {}
-                        self.log(f"Document {i+1}: page_content length={len(page_content)}, preview={page_content[:100]}, metadata={metadata}")
-                    
-                    # Convert documents to Data objects
-                    search_results = docs_to_data(docs)
-                    self.log(f"Converted to {len(search_results)} Data objects")
                 else:
                     error_msg = "Vector store does not have similarity_search or similarity_search_with_score methods"
                     self.log(error_msg)
                     self.status = error_msg
-                    return Message(text="Clarification needed")
+                    return Message(text="")
                     
             except Exception as search_error:
                 error_msg = f"Error during similarity search: {search_error}"
@@ -219,169 +198,43 @@ class ChromaSearchAgentComponent(LCVectorStoreComponent):
                 import traceback
                 self.log(f"Search error traceback: {traceback.format_exc()}")
                 self.status = error_msg
-                return Message(text="Clarification needed")
+                return Message(text="")
             
-            if not search_results:
-                self.log("No results found for the query (search_results is empty).")
+            if not docs:
+                self.log("No results found for the query.")
                 self.status = "No results found."
-                return Message(text="Clarification needed")
+                return Message(text="")
             
-            self.log(f"Have {len(search_results)} search results to process")
+            # Convert documents to text content
+            content_parts = []
+            for i, doc in enumerate(docs):
+                # Extract text content from document
+                text_content = ""
+                if hasattr(doc, "page_content"):
+                    text_content = doc.page_content
+                elif hasattr(doc, "text"):
+                    text_content = doc.text
+                elif isinstance(doc, str):
+                    text_content = doc
+                
+                if text_content:
+                    content_parts.append(f"--- Result {i+1} ---\n{text_content}")
             
-            # Search through all results for category terms
-            # Check both text content and metadata
-            combined_text = ""
-            for i, result in enumerate(search_results):
-                self.log(f"Processing result {i+1}: type={type(result).__name__}")
-                
-                # Try multiple ways to extract text content
-                text_extracted = False
-                
-                # Method 1: Check for text attribute
-                if hasattr(result, "text") and result.text:
-                    text_content = str(result.text)
-                    combined_text += " " + text_content
-                    self.log(f"  Found text attribute: {text_content[:150]}...")
-                    text_extracted = True
-                
-                # Method 2: Check for data dict with text fields
-                if hasattr(result, "data") and isinstance(result.data, dict):
-                    # Check various text fields in data
-                    for key in ["text", "content", "page_content", "data"]:
-                        if key in result.data and result.data[key]:
-                            text_content = str(result.data[key])
-                            combined_text += " " + text_content
-                            self.log(f"  Found data[{key}]: {text_content[:150]}...")
-                            text_extracted = True
-                    
-                    # Also check all metadata values
-                    if "metadata" in result.data and isinstance(result.data["metadata"], dict):
-                        for key, value in result.data["metadata"].items():
-                            if value:
-                                combined_text += " " + str(value)
-                                self.log(f"  Found metadata[{key}]: {str(value)[:150]}...")
-                                text_extracted = True
-                
-                # Method 3: Check for page_content attribute (Document objects)
-                if hasattr(result, "page_content") and result.page_content:
-                    text_content = str(result.page_content)
-                    combined_text += " " + text_content
-                    self.log(f"  Found page_content: {text_content[:150]}...")
-                    text_extracted = True
-                
-                # Method 4: Check for metadata attribute directly
-                if hasattr(result, "metadata") and isinstance(result.metadata, dict):
-                    for key, value in result.metadata.items():
-                        if value:
-                            combined_text += " " + str(value)
-                            self.log(f"  Found result.metadata[{key}]: {str(value)[:150]}...")
-                            text_extracted = True
-                
-                if not text_extracted:
-                    self.log(f"  WARNING: No text extracted from result {i+1}. Result attributes: {dir(result)}")
-                    # Try to convert entire result to string as last resort
-                    combined_text += " " + str(result)
-                    self.log(f"  Using string representation: {str(result)[:150]}...")
-            
-            self.log(f"Combined text length: {len(combined_text)} characters")
-            if combined_text.strip():
-                self.log(f"Combined text preview (first 500 chars): {combined_text[:500]}")
+            # Join all results
+            if content_parts:
+                result_text = "\n\n".join(content_parts)
+                self.log(f"Returning {len(content_parts)} search result(s)")
+                self.status = f"Found {len(content_parts)} result(s)"
+                return Message(text=result_text)
             else:
-                self.log("WARNING: Combined text is empty after processing all results!")
-            
-            # Normalize text for searching (lowercase)
-            combined_text_lower = combined_text.lower()
-            self.log(f"Searching for categories in combined text (first 500 chars): {combined_text_lower[:500]}")
-            
-            # Search for each category term (case-insensitive) and extract queries
-            # Check in order, return first match found with its queries
-            for category in categories:
-                category_lower = category.lower()
-                if category_lower in combined_text_lower:
-                    self.log(f"Found category '{category}' in search results")
-                    
-                    # Extract full content chunks from ALL matching documents
-                    content_chunks = []
-                    for i, result in enumerate(search_results):
-                        content_text = None
-                        
-                        # Method 1: Check metadata content field (most common location)
-                        if hasattr(result, "data") and isinstance(result.data, dict):
-                            if "metadata" in result.data and isinstance(result.data["metadata"], dict):
-                                metadata = result.data["metadata"]
-                                
-                                # Get the full content field
-                                if "content" in metadata:
-                                    content_text = str(metadata["content"]).strip()
-                                    self.log(f"Extracted full content from document {i+1} metadata content ({len(content_text)} chars)")
-                                
-                                # Fallback: if no content field, try to get all metadata values
-                                if not content_text:
-                                    # Combine all metadata values
-                                    metadata_parts = []
-                                    for key, value in metadata.items():
-                                        if value:
-                                            metadata_parts.append(f"{key}: {value}")
-                                    if metadata_parts:
-                                        content_text = "\n".join(metadata_parts)
-                                        self.log(f"Extracted content from document {i+1} metadata fields")
-                        
-                        # Method 2: Check page_content
-                        if not content_text and hasattr(result, "page_content"):
-                            content_text = str(result.page_content).strip()
-                            self.log(f"Extracted content from document {i+1} page_content ({len(content_text)} chars)")
-                        
-                        # Method 3: Check if result has metadata attribute directly
-                        if not content_text and hasattr(result, "metadata") and isinstance(result.metadata, dict):
-                            if "content" in result.metadata:
-                                content_text = str(result.metadata["content"]).strip()
-                                self.log(f"Extracted content from document {i+1} result.metadata.content ({len(content_text)} chars)")
-                        
-                        # Method 4: Check data fields directly
-                        if not content_text and hasattr(result, "data") and isinstance(result.data, dict):
-                            # Try common content field names
-                            for key in ["content", "text", "page_content", "data"]:
-                                if key in result.data and result.data[key]:
-                                    content_text = str(result.data[key]).strip()
-                                    self.log(f"Extracted content from document {i+1} data[{key}] ({len(content_text)} chars)")
-                                    break
-                        
-                        # Method 5: Check text attribute
-                        if not content_text and hasattr(result, "text") and result.text:
-                            content_text = str(result.text).strip()
-                            self.log(f"Extracted content from document {i+1} text attribute ({len(content_text)} chars)")
-                        
-                        # If we found content, add it to the list (avoid duplicates)
-                        if content_text and content_text.strip() and content_text not in content_chunks:
-                            content_chunks.append(content_text.strip())
-                            self.log(f"Added content chunk {len(content_chunks)}: {content_text[:200]}...")
-                    
-                    # Return all content chunks joined together
-                    if content_chunks:
-                        # Join all content chunks with a clear separator
-                        separator = "\n\n" + "="*80 + "\n\n"
-                        content_parts = [f"{'='*80}\n--- Content Chunk {i+1} ---\n{'='*80}\n{c}" for i, c in enumerate(content_chunks)]
-                        all_content = separator.join(content_parts)
-                        self.log(f"Returning {len(content_chunks)} content chunk(s) for category '{category}'")
-                        self.status = f"Category: {category} ({len(content_chunks)} chunks)"
-                        return Message(text=all_content)
-                    else:
-                        # Fallback: return category name if we can't extract content
-                        self.log(f"Category '{category}' found but no content extracted. Result structure: {[type(r).__name__ for r in search_results]}")
-                        self.status = f"Category: {category}"
-                        return Message(text=category)
-            
-            # If no category found, return default
-            self.log(f"No category found in search results. Searched for: {categories}")
-            self.log(f"Combined text sample: {combined_text_lower[:200]}")
-            self.status = "Category: Clarification needed"
-            return Message(text="Clarification needed")
+                self.log("No content extracted from search results.")
+                self.status = "No results found."
+                return Message(text="")
             
         except Exception as e:
             error_msg = f"Error during search: {e}"
             self.log(error_msg)
-            self.status = error_msg
-            # Log the full exception for debugging
             import traceback
             self.log(f"Traceback: {traceback.format_exc()}")
-            return Message(text="Clarification needed")
+            self.status = error_msg
+            return Message(text="")

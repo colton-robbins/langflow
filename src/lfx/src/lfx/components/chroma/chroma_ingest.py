@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from chromadb.config import Settings
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
 from typing_extensions import override
 
 from lfx.base.vectorstores.model import LCVectorStoreComponent, check_cached_vector_store
@@ -123,7 +124,7 @@ class ChromaVectorStoreComponent(LCVectorStoreComponent):
     def build_vector_store(self) -> Chroma:
         """Builds the Chroma object."""
         try:
-            from chromadb import Client
+            from chromadb import Client, PersistentClient
             from langchain_chroma import Chroma
         except ImportError as e:
             msg = "Could not import Chroma integration package. Please install it with `pip install langchain-chroma`."
@@ -144,6 +145,7 @@ class ChromaVectorStoreComponent(LCVectorStoreComponent):
         # Check persist_directory and expand it if it is a relative path
         persist_directory = self.resolve_path(self.persist_directory) if self.persist_directory is not None else None
 
+        # Create Chroma instance first (may load existing collection)
         chroma = Chroma(
             persist_directory=persist_directory,
             client=client,
@@ -151,9 +153,147 @@ class ChromaVectorStoreComponent(LCVectorStoreComponent):
             collection_name=self.collection_name,
         )
 
+        # Only clear collection when ingesting new data (not when just searching/reloading)
+        # Check if we have data to ingest - be very explicit about this check
+        ingest_data: list | Data | DataFrame = self.ingest_data
+        
+        # Check if we're in search-only mode (has search query but no ingest data)
+        has_search_query = bool(getattr(self, 'search_query', None) and str(self.search_query).strip())
+        
+        # More robust check: only consider it ingestion if we have actual non-empty data
+        # AND we're not in search-only mode
+        has_data_to_ingest = False
+        if ingest_data is not None and not has_search_query:
+            if isinstance(ingest_data, list):
+                # Empty list means no data to ingest
+                has_data_to_ingest = len(ingest_data) > 0
+            elif hasattr(ingest_data, 'empty'):
+                # DataFrame case - check if empty
+                has_data_to_ingest = not ingest_data.empty
+            else:
+                # Data object or other - check if it's truthy and has content
+                has_data_to_ingest = bool(ingest_data) and (
+                    (hasattr(ingest_data, 'data') and ingest_data.data) or
+                    (hasattr(ingest_data, 'get_text') and ingest_data.get_text())
+                )
+        
+        self.log(f"Checking ingestion mode: ingest_data={type(ingest_data).__name__}, has_search_query={has_search_query}, has_data_to_ingest={has_data_to_ingest}")
+
+        if has_data_to_ingest:
+            # Clear ALL existing documents from the collection to ensure fresh start
+            # This prevents any duplicates from previous ingestions
+            self.log(f"Detected new data to ingest. Clearing existing collection '{self.collection_name}' to ensure fresh start.")
+            try:
+                # Get all existing documents BEFORE clearing
+                existing_docs = chroma.get()
+                if existing_docs and existing_docs.get("ids"):
+                    existing_ids = existing_docs["ids"]
+                    existing_documents = existing_docs.get("documents", [])
+                    existing_metadatas = existing_docs.get("metadatas", [])
+                    
+                    if existing_ids:
+                        # Log what we're about to clear
+                        self.log(f"BEFORE CLEARING: Found {len(existing_ids)} existing documents in collection '{self.collection_name}'")
+                        # Show sample of what's being cleared (first 3 documents)
+                        for i, doc_id in enumerate(existing_ids[:3]):
+                            doc_text = existing_documents[i] if i < len(existing_documents) else "N/A"
+                            metadata = existing_metadatas[i] if i < len(existing_metadatas) else {}
+                            # Truncate long text for logging
+                            text_preview = doc_text[:100] + "..." if len(doc_text) > 100 else doc_text
+                            self.log(f"  Document {i+1} (ID: {doc_id[:20]}...): text_preview='{text_preview}', metadata_keys={list(metadata.keys())}")
+                        
+                        if len(existing_ids) > 3:
+                            self.log(f"  ... and {len(existing_ids) - 3} more documents")
+                        
+                        # Delete all existing documents by their IDs
+                        chroma.delete(ids=existing_ids)
+                        self.log(f"AFTER CLEARING: Deleted {len(existing_ids)} documents from collection '{self.collection_name}'")
+                        
+                        # Verify collection is empty
+                        verify_docs = chroma.get()
+                        verify_count = len(verify_docs.get("ids", [])) if verify_docs else 0
+                        self.log(f"VERIFICATION: Collection now contains {verify_count} documents (should be 0)")
+                    else:
+                        self.log(f"Collection '{self.collection_name}' is empty, ready for fresh data.")
+                else:
+                    self.log(f"Collection '{self.collection_name}' is empty, ready for fresh data.")
+            except Exception as e:
+                # If clearing fails, try alternative method: delete collection and recreate
+                self.log(f"Warning: Could not clear documents via delete: {e}. Attempting to delete collection...")
+                try:
+                    # Try to delete the entire collection via the underlying client
+                    if hasattr(chroma, "_client") and chroma._client is not None:
+                        chroma._client.delete_collection(name=self.collection_name)
+                        self.log(f"Deleted collection '{self.collection_name}' via client.")
+                        # Recreate Chroma instance with fresh collection
+                        chroma = Chroma(
+                            persist_directory=persist_directory,
+                            client=client,
+                            embedding_function=self.embedding,
+                            collection_name=self.collection_name,
+                        )
+                    elif client is None and persist_directory:
+                        # For local persist directory, create a client to delete collection
+                        temp_client = PersistentClient(path=persist_directory)
+                        try:
+                            temp_client.delete_collection(name=self.collection_name)
+                            self.log(f"Deleted collection '{self.collection_name}' via PersistentClient.")
+                            # Recreate Chroma instance with fresh collection
+                            chroma = Chroma(
+                                persist_directory=persist_directory,
+                                client=client,
+                                embedding_function=self.embedding,
+                                collection_name=self.collection_name,
+                            )
+                        except Exception as del_e:
+                            self.log(f"Could not delete collection: {del_e}")
+                    elif client is not None:
+                        # For server-based client, delete collection directly
+                        try:
+                            client.delete_collection(name=self.collection_name)
+                            self.log(f"Deleted collection '{self.collection_name}' via server client.")
+                            # Recreate Chroma instance with fresh collection
+                            chroma = Chroma(
+                                persist_directory=persist_directory,
+                                client=client,
+                                embedding_function=self.embedding,
+                                collection_name=self.collection_name,
+                            )
+                        except Exception as del_e:
+                            self.log(f"Could not delete collection: {del_e}")
+                except Exception as del_e2:
+                    self.log(f"Warning: All deletion methods failed: {del_e2}. Will rely on duplicate checking.")
+        else:
+            # No data to ingest, just use existing collection for searching
+            self.log(f"No new data to ingest. Using existing collection '{self.collection_name}' for search operations.")
+            # Log current collection state for reference
+            try:
+                current_docs = chroma.get()
+                current_count = len(current_docs.get("ids", [])) if current_docs else 0
+                self.log(f"CURRENT STATE: Collection '{self.collection_name}' contains {current_count} document(s) (not modified)")
+                if current_count > 0:
+                    # Show sample of existing documents
+                    current_ids = current_docs.get("ids", [])[:3]
+                    current_documents = current_docs.get("documents", [])
+                    current_metadatas = current_docs.get("metadatas", [])
+                    self.log(f"Sample of existing documents (first {min(3, len(current_ids))}):")
+                    for i, doc_id in enumerate(current_ids):
+                        doc_text = current_documents[i] if i < len(current_documents) else "N/A"
+                        metadata = current_metadatas[i] if i < len(current_metadatas) else {}
+                        text_preview = doc_text[:100] + "..." if len(doc_text) > 100 else doc_text
+                        self.log(f"  Document {i+1} (ID: {doc_id[:20]}...): text_preview='{text_preview}', metadata_keys={list(metadata.keys())}")
+            except Exception as e:
+                self.log(f"Could not retrieve collection state: {e}")
+
         self._add_documents_to_vector_store(chroma)
+        
+        # Log final collection state
         limit = int(self.limit) if self.limit is not None and str(self.limit).strip() else None
-        self.status = chroma_collection_to_data(chroma.get(limit=limit))
+        final_collection = chroma.get(limit=limit)
+        final_count = len(final_collection.get("ids", [])) if final_collection else 0
+        self.log(f"BUILD COMPLETE: Collection '{self.collection_name}' final state: {final_count} document(s)")
+        
+        self.status = chroma_collection_to_data(final_collection)
         return chroma
 
     def _add_documents_to_vector_store(self, vector_store: "Chroma") -> None:
@@ -161,43 +301,110 @@ class ChromaVectorStoreComponent(LCVectorStoreComponent):
         ingest_data: list | Data | DataFrame = self.ingest_data
         if not ingest_data:
             self.status = ""
+            self.log("No ingest_data provided, skipping document addition.")
             return
 
         # Convert DataFrame to Data if needed using parent's method
         ingest_data = self._prepare_ingest_data()
+        
+        self.log(f"PREPARING TO ADD: Processing {len(ingest_data) if isinstance(ingest_data, list) else 1} data item(s) for ingestion")
 
         stored_documents_without_id = []
         if self.allow_duplicates:
             stored_data = []
+            self.log("Duplicate checking disabled (allow_duplicates=True)")
         else:
             limit = int(self.limit) if self.limit is not None and str(self.limit).strip() else None
             stored_data = chroma_collection_to_data(vector_store.get(limit=limit))
+            self.log(f"Checking for duplicates: Found {len(stored_data)} existing documents in collection")
             for value in deepcopy(stored_data):
                 del value.id
                 stored_documents_without_id.append(value)
 
         documents = []
-        for _input in ingest_data or []:
+        skipped_duplicates = 0
+        for i, _input in enumerate(ingest_data or []):
             if isinstance(_input, Data):
                 if _input not in stored_documents_without_id:
-                    documents.append(_input.to_lc_document())
+                    # Handle incoming row data: if 'content' field exists, use it as page_content
+                    page_content = None
+                    metadata = {}
+                    
+                    if 'content' in _input.data and isinstance(_input.data['content'], str):
+                        # Use the content field as page_content
+                        page_content = _input.data['content']
+                        # Copy all other fields as metadata (except content)
+                        metadata = {k: v for k, v in _input.data.items() if k != 'content'}
+                    else:
+                        # Use standard conversion via to_lc_document()
+                        doc = _input.to_lc_document()
+                        page_content = doc.page_content
+                        metadata = doc.metadata.copy() if doc.metadata else {}
+                    
+                    # Create Document with the determined content
+                    doc = Document(page_content=page_content, metadata=metadata)
+                    documents.append(doc)
+                    
+                    # Log first 3 documents being added
+                    if len(documents) <= 3:
+                        text_preview = doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content
+                        metadata_keys = list(doc.metadata.keys()) if doc.metadata else []
+                        self.log(f"  Document {len(documents)} to add: text_preview='{text_preview}', metadata_keys={metadata_keys}")
+                else:
+                    skipped_duplicates += 1
             else:
                 msg = "Vector Store Inputs must be Data objects."
                 raise TypeError(msg)
 
+        if skipped_duplicates > 0:
+            self.log(f"Skipped {skipped_duplicates} duplicate document(s) (already exist in collection)")
+
         if documents and self.embedding is not None:
-            self.log(f"Adding {len(documents)} documents to the Vector Store.")
+            self.log(f"ADDING DOCUMENTS: About to add {len(documents)} new document(s) to the Vector Store")
             # Filter complex metadata to prevent ChromaDB errors
             try:
                 from langchain_community.vectorstores.utils import filter_complex_metadata
 
                 filtered_documents = filter_complex_metadata(documents)
+                if len(filtered_documents) != len(documents):
+                    self.log(f"Filtered {len(documents) - len(filtered_documents)} document(s) with complex metadata")
                 vector_store.add_documents(filtered_documents)
+                self.log(f"SUCCESS: Added {len(filtered_documents)} document(s) to collection '{self.collection_name}'")
+                
+                # Verify what's in the collection now
+                final_docs = vector_store.get()
+                final_count = len(final_docs.get("ids", [])) if final_docs else 0
+                self.log(f"FINAL STATE: Collection '{self.collection_name}' now contains {final_count} total document(s)")
+                
+                # Show sample of final documents (last 3 added)
+                if final_docs and final_docs.get("ids"):
+                    final_ids = final_docs.get("ids", [])
+                    final_documents = final_docs.get("documents", [])
+                    final_metadatas = final_docs.get("metadatas", [])
+                    # Show last 3 documents
+                    start_idx = max(0, len(final_ids) - 3)
+                    self.log(f"Sample of final documents (last {min(3, len(final_ids))}):")
+                    for i in range(start_idx, len(final_ids)):
+                        idx = i - start_idx
+                        doc_id = final_ids[i]
+                        doc_text = final_documents[i] if i < len(final_documents) else "N/A"
+                        metadata = final_metadatas[i] if i < len(final_metadatas) else {}
+                        text_preview = doc_text[:100] + "..." if len(doc_text) > 100 else doc_text
+                        self.log(f"  Document {idx+1} (ID: {doc_id[:20]}...): text_preview='{text_preview}', metadata_keys={list(metadata.keys())}")
             except ImportError:
                 self.log("Warning: Could not import filter_complex_metadata. Adding documents without filtering.")
                 vector_store.add_documents(documents)
+                self.log(f"SUCCESS: Added {len(documents)} document(s) to collection '{self.collection_name}'")
+                
+                # Verify what's in the collection now
+                final_docs = vector_store.get()
+                final_count = len(final_docs.get("ids", [])) if final_docs else 0
+                self.log(f"FINAL STATE: Collection '{self.collection_name}' now contains {final_count} total document(s)")
         else:
-            self.log("No documents to add to the Vector Store.")
+            if not documents:
+                self.log("No documents to add to the Vector Store (all were duplicates or empty).")
+            elif not self.embedding:
+                self.log("No embedding function provided, cannot add documents to the Vector Store.")
 
     @override
     def search_documents(self) -> list[Data]:
