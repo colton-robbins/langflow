@@ -1824,9 +1824,23 @@ class Graph:
 
             await logger.adebug(f"Vertex {v.id}, result: {v.built_result}, object: {v.built_object}")
 
-        for v in vertices:
-            next_runnable_vertices = await self.get_next_runnable_vertices(lock, vertex=v, cache=False)
+        # Collect next runnable vertices for all completed vertices concurrently
+        # This allows parallel vertices to determine their successors without
+        # blocking each other unnecessarily. Each call will still use the lock
+        # for thread-safety, but they can proceed concurrently and the lock
+        # will serialize only the critical sections.
+        next_runnable_tasks = [
+            self.get_next_runnable_vertices(lock, vertex=v, cache=False)
+            for v in vertices
+        ]
+        
+        # Wait for all next runnable vertex calculations to complete
+        next_runnable_results = await asyncio.gather(*next_runnable_tasks)
+        
+        # Flatten and deduplicate results
+        for next_runnable_vertices in next_runnable_results:
             results.extend(next_runnable_vertices)
+        
         return list(set(results))
 
     def topological_sort(self) -> list[Vertex]:

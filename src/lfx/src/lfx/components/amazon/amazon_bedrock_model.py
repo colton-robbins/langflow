@@ -97,6 +97,7 @@ class AmazonBedrockComponent(LCModelComponent):
             raise ImportError(msg) from e
         try:
             import boto3
+            from botocore.config import Config
         except ImportError as e:
             msg = "boto3 is not installed. Please install it with `pip install boto3`."
             raise ImportError(msg) from e
@@ -120,7 +121,20 @@ class AmazonBedrockComponent(LCModelComponent):
         
         session = self._cached_boto3_session
 
-        client_params = {}
+        # Optimize boto3 client configuration for connection reuse and performance
+        boto_config = Config(
+            max_pool_connections=50,
+            connect_timeout=10,
+            read_timeout=60,
+            retries={
+                "max_attempts": 3,
+                "mode": "adaptive"
+            }
+        )
+
+        client_params = {
+            "config": boto_config
+        }
         if self.endpoint_url:
             client_params["endpoint_url"] = self.endpoint_url
         if self.region_name:
