@@ -698,11 +698,25 @@ class AgentComponent(ToolCallingAgentComponent):
 
     async def get_memory_data(self):
         # TODO: This is a temporary fix to avoid message duplication. We should develop a function for this.
+        # Use session_id and context_id from incoming message if available, otherwise use component/graph values
+        # This ensures the agent retrieves messages from the same conversation context as Chat Input
+        incoming_session_id = None
+        incoming_context_id = None
+        if isinstance(self.input_value, Message):
+            if hasattr(self.input_value, "session_id"):
+                incoming_session_id = self.input_value.session_id
+            if hasattr(self.input_value, "context_id"):
+                incoming_context_id = self.input_value.context_id
+        
+        # Prefer incoming message's session_id/context_id, then component's, then graph's
+        session_id = incoming_session_id or self.graph.session_id or ""
+        context_id = incoming_context_id or self.context_id or ""
+        
         messages = (
             await MemoryComponent(**self.get_base_args())
             .set(
-                session_id=self.graph.session_id,
-                context_id=self.context_id,
+                session_id=session_id,
+                context_id=context_id,
                 order="Ascending",
                 n_messages=self.n_messages,
             )

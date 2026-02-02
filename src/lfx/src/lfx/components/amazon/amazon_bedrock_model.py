@@ -22,6 +22,8 @@ class AmazonBedrockComponent(LCModelComponent):
         super().__init__(**kwargs)
         self._cached_boto3_session = None
         self._cached_boto3_client = None
+        self._cached_model = None
+        self._cached_model_key = None
 
     inputs = [
         *LCModelComponent.get_base_inputs(),
@@ -146,6 +148,22 @@ class AmazonBedrockComponent(LCModelComponent):
         
         boto3_client = self._cached_boto3_client
         
+        # Create a cache key based on model parameters to avoid unnecessary recreation
+        import hashlib
+        import json
+        cache_key_data = {
+            "model_id": self.model_id,
+            "region_name": self.region_name,
+            "model_kwargs": self.model_kwargs,
+            "endpoint_url": self.endpoint_url,
+            "streaming": self.stream,
+        }
+        cache_key = hashlib.md5(json.dumps(cache_key_data, sort_keys=True, default=str).encode()).hexdigest()
+
+        # Return cached model if parameters haven't changed
+        if self._cached_model is not None and self._cached_model_key == cache_key:
+            return self._cached_model
+        
         try:
             output = ChatBedrock(
                 client=boto3_client,
@@ -155,6 +173,9 @@ class AmazonBedrockComponent(LCModelComponent):
                 endpoint_url=self.endpoint_url,
                 streaming=self.stream,
             )
+            # Cache the model instance and key
+            self._cached_model = output
+            self._cached_model_key = cache_key
         except Exception as e:
             msg = "Could not connect to AmazonBedrock API."
             raise ValueError(msg) from e

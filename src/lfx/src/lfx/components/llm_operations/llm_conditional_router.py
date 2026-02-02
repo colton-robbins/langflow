@@ -160,13 +160,48 @@ class SmartRouterComponent(Component):
         conversation_lines = []
         
         # Handle different chat_history formats
-        if isinstance(chat_history, Data):
-            # Single Data object
-            text = getattr(chat_history, "text", None) or getattr(chat_history, "value", "")
-            sender = getattr(chat_history, "sender", "User")
-            sender_name = getattr(chat_history, "sender_name", sender)
-            if text:
-                conversation_lines.append(f"{sender_name}: {text}")
+        if isinstance(chat_history, Message):
+            # Message object - could be formatted text or a single message
+            text = getattr(chat_history, "text", None) or ""
+            # If the text contains multiple lines with sender names (formatted history),
+            # use it directly; otherwise format as a single message
+            if text and "\n" in text and (":" in text or "User:" in text or "Machine:" in text):
+                # Already formatted conversation history text
+                return text
+            else:
+                # Single message, format it
+                sender_name = getattr(chat_history, "sender_name", None) or getattr(chat_history, "sender", "User")
+                if text:
+                    conversation_lines.append(f"{sender_name}: {text}")
+        elif isinstance(chat_history, Data):
+            # Data object - check if it contains a list of messages in data attribute
+            if hasattr(chat_history, "data") and isinstance(chat_history.data, list):
+                # Data object wrapping a list of messages
+                for msg in chat_history.data:
+                    if isinstance(msg, Message):
+                        text = msg.text or ""
+                        sender_name = msg.sender_name or msg.sender or "User"
+                        if text:
+                            conversation_lines.append(f"{sender_name}: {text}")
+                    elif isinstance(msg, Data):
+                        text = getattr(msg, "text", None) or getattr(msg, "value", "")
+                        sender = getattr(msg, "sender", "User")
+                        sender_name = getattr(msg, "sender_name", sender)
+                        if text:
+                            conversation_lines.append(f"{sender_name}: {text}")
+                    elif isinstance(msg, dict):
+                        # Dictionary representation of a message
+                        text = msg.get("text") or msg.get("content") or ""
+                        sender_name = msg.get("sender_name") or msg.get("sender", "User")
+                        if text:
+                            conversation_lines.append(f"{sender_name}: {text}")
+            else:
+                # Single Data object
+                text = getattr(chat_history, "text", None) or getattr(chat_history, "value", "")
+                sender = getattr(chat_history, "sender", "User")
+                sender_name = getattr(chat_history, "sender_name", sender)
+                if text:
+                    conversation_lines.append(f"{sender_name}: {text}")
         elif isinstance(chat_history, list):
             # List of Message/Data objects
             for msg in chat_history:
@@ -181,12 +216,22 @@ class SmartRouterComponent(Component):
                     sender_name = getattr(msg, "sender_name", sender)
                     if text:
                         conversation_lines.append(f"{sender_name}: {text}")
+                elif isinstance(msg, dict):
+                    # Dictionary representation of a message
+                    text = msg.get("text") or msg.get("content") or ""
+                    sender_name = msg.get("sender_name") or msg.get("sender", "User")
+                    if text:
+                        conversation_lines.append(f"{sender_name}: {text}")
                 elif hasattr(msg, "text") or hasattr(msg, "content"):
                     # Try to extract text from various message formats
                     text = getattr(msg, "text", None) or getattr(msg, "content", "")
                     sender_name = getattr(msg, "sender_name", None) or getattr(msg, "sender", "User")
                     if text:
                         conversation_lines.append(f"{sender_name}: {text}")
+        elif isinstance(chat_history, str):
+            # Plain string - use as-is if it looks like formatted history
+            if chat_history.strip():
+                return chat_history
         
         if conversation_lines:
             return "\n".join(conversation_lines)

@@ -13,14 +13,17 @@ if TYPE_CHECKING:
     from lfx.components.processing.data_operations import DataOperationsComponent
     from lfx.components.processing.dataframe_operations import DataFrameOperationsComponent
     from lfx.components.processing.dataframe_to_toolset import DataFrameToToolsetComponent
+    from lfx.components.processing.extract_special_instructions import ExtractSpecialInstructionsComponent
     from lfx.components.processing.json_cleaner import JSONCleaner
     from lfx.components.processing.output_parser import OutputParserComponent
+    from lfx.components.processing.parallel_distributor import ParallelDistributorComponent
     from lfx.components.processing.parse_data import ParseDataComponent
     from lfx.components.processing.parser import ParserComponent
     from lfx.components.processing.regex import RegexExtractorComponent
     from lfx.components.processing.split_csv_by_row import SplitCSVByRowComponent
     from lfx.components.processing.split_text import SplitTextComponent
     from lfx.components.processing.store_message import MessageStoreComponent
+    from lfx.components.processing.user_context_section_selector import UserContextSectionSelectorComponent
 
 _dynamic_imports = {
     "CombineTextComponent": "combine_text",
@@ -29,14 +32,17 @@ _dynamic_imports = {
     "DataOperationsComponent": "data_operations",
     "DataFrameOperationsComponent": "dataframe_operations",
     "DataFrameToToolsetComponent": "dataframe_to_toolset",
+    "ExtractSpecialInstructionsComponent": "extract_special_instructions",
     "JSONCleaner": "json_cleaner",
     "OutputParserComponent": "output_parser",
+    "ParallelDistributorComponent": "parallel_distributor",
     "ParseDataComponent": "parse_data",
     "ParserComponent": "parser",
     "RegexExtractorComponent": "regex",
     "SplitCSVByRowComponent": "split_csv_by_row",
     "SplitTextComponent": "split_text",
     "MessageStoreComponent": "store_message",
+    "UserContextSectionSelectorComponent": "user_context_section_selector",
 }
 
 __all__ = [
@@ -45,15 +51,18 @@ __all__ = [
     "DataFrameOperationsComponent",
     "DataFrameToToolsetComponent",
     "DataOperationsComponent",
+    "ExtractSpecialInstructionsComponent",
     "JSONCleaner",
     "MessageStoreComponent",
     "OutputParserComponent",
+    "ParallelDistributorComponent",
     "ParseDataComponent",
     "ParserComponent",
     "RegexExtractorComponent",
     "SplitCSVByRowComponent",
     "SplitTextComponent",
     "TypeConverterComponent",
+    "UserContextSectionSelectorComponent",
 ]
 
 

@@ -1,0 +1,177 @@
+{
+    "user_context": {
+        "identity": {
+            "user_id": 133,
+            "name": "Umar Rana",
+            "email": "umar.rana@outlook.com",
+            "role": {
+                "id": 7,
+                "name": "everything-v2"
+            },
+            "is_super_admin": false,
+            "is_primary_user": true,
+            "is_internal_reviewer": false,
+            "is_help_desk": false
+        },
+        "permissions": {
+            "role_based": {
+                "can_create_folders": false,
+                "can_edit_folders": false,
+                "can_delete_folders": false,
+                "can_share_folders": false,
+                "can_upload_documents": false,
+                "can_edit_documents": false,
+                "can_delete_documents": false,
+                "can_view_reports": false,
+                "can_generate_reports": false,
+                "can_view_claims": false,
+                "can_view_proposals": true
+            },
+            "feature_access": {
+                "full_groups_access": false,
+                "pbm_access": true,
+                "stoploss_access": true,
+                "demo_groups_access": true
+            },
+            "module_access": {
+                "document_manager": {
+                    "view": false,
+                    "create": false,
+                    "edit": false,
+                    "delete": false
+                },
+                "reports": {
+                    "view": false,
+                    "create": false,
+                    "edit": false,
+                    "delete": false
+                },
+                "pbm_rfp": {
+                    "view": true,
+                    "create": false,
+                    "edit": false,
+                    "delete": false
+                },
+                "stoploss_rfp": {
+                    "view": true,
+                    "create": false,
+                    "edit": false,
+                    "delete": false
+                },
+                "claims": {
+                    "view": false,
+                    "create": false,
+                    "edit": false,
+                    "delete": false
+                },
+                "demo_groups": {
+                    "view": true,
+                    "create": false,
+                    "edit": false,
+                    "delete": false
+                }
+            }
+        },
+        "organization": {
+            "id": 1,
+            "name": "Brokerage 1",
+            "type": "Broker",
+            "is_admin": true,
+            "hierarchy": {
+                "is_root": true,
+                "parent_id": null,
+                "parent_name": null,
+                "child_count": 3,
+                "depth": 0
+            },
+            "accessible_organizations": [
+                {
+                    "id": 1,
+                    "name": "Brokerage 1",
+                    "access_type": "partial"
+                },
+                {
+                    "id": 1,
+                    "name": "Brokerage 1",
+                    "access_type": "partial"
+                },
+                {
+                    "id": 43,
+                    "name": "Alpha Brokerage",
+                    "access_type": "partial"
+                },
+                {
+                    "id": 44,
+                    "name": "Bravo  Brokerage1",
+                    "access_type": "partial"
+                },
+                {
+                    "id": 9,
+                    "name": "Blue Brokerage",
+                    "access_type": "partial"
+                }
+            ],
+            "share_group_ids": [
+                71,
+                101
+            ]
+        },
+        "group_context": null,
+        "session_state": {
+            "session_id": 832,
+            "session_uuid": "5bc98c09-0d26-4637-a56b-ff05743f4a13",
+            "date_range": null,
+            "selected_context": {
+                "folders": [
+                    {
+                        "id": 4050,
+                        "name": "Compliance Resources",
+                        "uuid": "1b81baac-7ae7-42e2-8745-467fc404fa46",
+                        "is_system_folder": false,
+                        "permission_level": "owner"
+                    }
+                ],
+                "files": [
+                    {
+                        "id": 243,
+                        "name": "Screenshot 2026-01-27 at 6.14.45\u202fPM.png"
+                    },
+                    {
+                        "id": 244,
+                        "name": "Screenshot 2026-01-27 at 6.20.09\u202fPM.png"
+                    }
+                ]
+            }
+        },
+        "document_manager": {
+            "enabled": true,
+            "folder_permissions": {
+                "sharing_types": {
+                    "private_only": "Only the owner can access",
+                    "public_to_my_organization": "All organization members can access",
+                    "specific_users": "Only specified users can access"
+                },
+                "access_levels": {
+                    "owner": "Full control including delete and share",
+                    "admin": "Can edit, delete, and manage sharing",
+                    "editor": "Can view and edit files",
+                    "viewer": "Can only view files"
+                },
+                "inheritance": "Subfolders inherit parent folder's group and organization"
+            },
+            "system_folders": [
+                "Plan Documents",
+                "Reports",
+                "RFPs",
+                "Stop Loss Proposals"
+            ],
+            "accessible_folder_count": 808,
+            "accessible_file_count": 21
+        },
+        "compliance": {
+            "hipaa_compliant": true,
+            "data_handling_restrictions": [],
+            "audit_enabled": true
+        }
+    }
+}

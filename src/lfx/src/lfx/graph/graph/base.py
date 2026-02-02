@@ -1516,6 +1516,7 @@ class Graph:
         """
         vertex = self.get_vertex(vertex_id)
         self.run_manager.add_to_vertices_being_run(vertex_id)
+        await logger.adebug(f"Starting build_vertex for {vertex_id} (display_name: {vertex.display_name})")
         try:
             params = ""
             should_build = False
@@ -1629,6 +1630,9 @@ class Graph:
         """Processes the graph with vertices in each layer run in parallel."""
         has_webhook_component = "webhook" in start_component_id.lower() if start_component_id else False
         first_layer = self.sort_vertices(start_component_id=start_component_id)
+        await logger.adebug(f"First layer determined: {first_layer} (length: {len(first_layer)})")
+        if len(first_layer) > 1:
+            await logger.adebug(f"Multiple vertices in first layer - should execute in parallel: {first_layer}")
         vertex_task_run_count: dict[str, int] = {}
         to_process = deque(first_layer)
         layer_index = 0
@@ -1670,6 +1674,9 @@ class Graph:
                 vertex_task_run_count[vertex_id] = vertex_task_run_count.get(vertex_id, 0) + 1
 
             await logger.adebug(f"Running layer {layer_index} with {len(tasks)} tasks, {current_batch}")
+            # Log task creation to verify parallel execution
+            if len(tasks) > 1:
+                await logger.adebug(f"Created {len(tasks)} tasks for parallel execution: {[t.get_name() for t in tasks]}")
             try:
                 next_runnable_vertices = await self._execute_tasks(
                     tasks, lock=lock, has_webhook_component=has_webhook_component
@@ -1784,7 +1791,15 @@ class Graph:
             has_webhook_component: Whether the graph has a webhook component
         """
         results = []
+        # Log that we're about to execute tasks in parallel
+        if len(tasks) > 1:
+            await logger.adebug(f"Executing {len(tasks)} tasks in parallel using asyncio.gather")
+        import time
+        start_time = time.perf_counter()
         completed_tasks = await asyncio.gather(*tasks, return_exceptions=True)
+        elapsed_time = time.perf_counter() - start_time
+        if len(tasks) > 1:
+            await logger.adebug(f"Completed {len(tasks)} tasks in {elapsed_time:.3f}s (parallel execution)")
         vertices: list[Vertex] = []
 
         for i, result in enumerate(completed_tasks):

@@ -18,7 +18,8 @@ from lfx.base.agents.events import (
     handle_on_tool_end,
 )
 from lfx.components.langchain_utilities.tool_calling import ToolCallingAgentComponent
-from lfx.io import BoolInput, MessageTextInput, Output
+from lfx.components.models_and_agents.memory import MemoryComponent
+from lfx.io import BoolInput, IntInput, MessageTextInput, Output
 from lfx.log.logger import logger
 from lfx.schema.message import Message
 
@@ -44,6 +45,21 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
             value="",
             advanced=True,
         ),
+        MessageTextInput(
+            name="context_id",
+            display_name="Context ID",
+            info="The context ID of the chat. Adds an extra layer to the local memory.",
+            value="",
+            advanced=True,
+        ),
+        IntInput(
+            name="n_messages",
+            display_name="Number of Chat History Messages",
+            value=100,
+            info="Number of chat history messages to retrieve.",
+            advanced=True,
+            show=True,
+        ),
     ]
 
     outputs = [
@@ -59,11 +75,53 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
         """Local no-op function for send_message_callback when not connected to ChatOutput."""
         return message
 
+    async def get_memory_data(self):
+        """Retrieve chat history messages from memory.
+        
+        Uses session_id and context_id from incoming message if available,
+        otherwise uses component/graph values. This ensures the agent retrieves
+        messages from the same conversation context as Chat Input.
+        """
+        # Use session_id and context_id from incoming message if available, otherwise use component/graph values
+        incoming_session_id = None
+        incoming_context_id = None
+        if isinstance(self.input_value, Message):
+            if hasattr(self.input_value, "session_id"):
+                incoming_session_id = self.input_value.session_id
+            if hasattr(self.input_value, "context_id"):
+                incoming_context_id = self.input_value.context_id
+        
+        # Prefer incoming message's session_id/context_id, then component's, then graph's
+        session_id = incoming_session_id or (self.graph.session_id if hasattr(self, "graph") else None) or ""
+        context_id = incoming_context_id or getattr(self, "context_id", "") or ""
+        n_messages = getattr(self, "n_messages", 100)
+        
+        messages = (
+            await MemoryComponent(**self.get_base_args())
+            .set(
+                session_id=session_id,
+                context_id=context_id,
+                order="Ascending",
+                n_messages=n_messages,
+            )
+            .retrieve_messages()
+        )
+        return [
+            message for message in messages if getattr(message, "id", None) != getattr(self.input_value, "id", None)
+        ]
+
     async def message_response(self) -> Message:
         """Execute the agent and return the response."""
         if not self.tools:
             msg = "No tools provided. Please connect at least one tool."
             raise ValueError(msg)
+
+        # Retrieve chat history from memory if not already provided via input
+        if not hasattr(self, "chat_history") or not self.chat_history:
+            self.chat_history = await self.get_memory_data()
+            await logger.adebug(f"Retrieved {len(self.chat_history)} chat history messages")
+            if isinstance(self.chat_history, Message):
+                self.chat_history = [self.chat_history]
 
         agent = self.create_agent_runnable()
 

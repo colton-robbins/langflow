@@ -125,6 +125,7 @@ class LCModelComponent(Component):
                 raise ValueError(msg)
 
     async def text_response(self) -> Message:
+        # Build model lazily - only when text_response is called, not during initialization
         output = self.build_model()
         result = await self.get_chat_result(
             runnable=output, stream=self.stream, input_value=self.input_value, system_message=self.system_message

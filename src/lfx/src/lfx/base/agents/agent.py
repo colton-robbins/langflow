@@ -132,13 +132,35 @@ class LCAgentComponent(Component):
         """
         messages = []
         for value in data:
-            # Only skip if the message has a text attribute that is empty/whitespace
+            # Skip if the message has no text content (None, empty string, or whitespace-only)
             text = getattr(value, "text", None)
-            if isinstance(text, str) and not text.strip():
-                # Skip only messages with empty/whitespace-only text strings
-                continue
+            # Check if text is None, empty string, or whitespace-only
+            if text is None or (isinstance(text, str) and not text.strip()):
+                # Check if message has files or other content that makes it valid
+                files = getattr(value, "files", None)
+                # Skip only if there are no files and no text content
+                if not files or (isinstance(files, list) and len(files) == 0):
+                    continue
 
             lc_message = value.to_lc_message()
+            # Double-check the LangChain message content before adding
+            # Skip if content is empty string
+            if hasattr(lc_message, "content"):
+                content = lc_message.content
+                # If content is a string and empty, skip it
+                if isinstance(content, str) and not content.strip():
+                    continue
+                # If content is a list, check if it has any meaningful content
+                elif isinstance(content, list):
+                    has_content = any(
+                        (isinstance(item, dict) and 
+                         ((item.get("type") == "text" and item.get("text", "").strip()) or
+                          item.get("type") in ("image", "image_url", "file")))
+                        for item in content
+                    )
+                    if not has_content:
+                        continue
+
             messages.append(lc_message)
 
         return messages
@@ -185,8 +207,26 @@ class LCAgentComponent(Component):
         if "input" not in input_dict:
             input_dict = {"input": self.input_value}
 
-        if hasattr(self, "system_prompt") and self.system_prompt and self.system_prompt.strip():
-            input_dict["system_prompt"] = self.system_prompt
+        # Extract system_prompt text, handling both string and Message inputs
+        if hasattr(self, "system_prompt") and self.system_prompt:
+            system_prompt_text = None
+            if isinstance(self.system_prompt, Message):
+                # If it's a Message object, extract the text
+                if hasattr(self.system_prompt, "text") and self.system_prompt.text:
+                    system_prompt_text = self.system_prompt.text.strip()
+                elif hasattr(self.system_prompt, "format_text"):
+                    # Format the template if it exists
+                    formatted = self.system_prompt.format_text()
+                    system_prompt_text = formatted.strip() if formatted else None
+                else:
+                    system_prompt_text = str(self.system_prompt).strip()
+            elif isinstance(self.system_prompt, str):
+                system_prompt_text = self.system_prompt.strip()
+            else:
+                system_prompt_text = str(self.system_prompt).strip() if self.system_prompt else None
+            
+            if system_prompt_text:
+                input_dict["system_prompt"] = system_prompt_text
 
         if hasattr(self, "chat_history") and self.chat_history:
             if isinstance(self.chat_history, Data):

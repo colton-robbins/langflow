@@ -21,6 +21,8 @@ class AmazonBedrockConverseComponent(LCModelComponent):
         super().__init__(**kwargs)
         self._cached_boto3_session = None
         self._cached_boto3_client = None
+        self._cached_model = None
+        self._cached_model_key = None
 
     inputs = [
         *LCModelComponent.get_base_inputs(),
@@ -136,6 +138,14 @@ class AmazonBedrockConverseComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        # Optimization: If model_output is not connected and we have a cached model,
+        # return it immediately to avoid expensive boto3 client creation during initialization.
+        # This prevents the 7-second delay when model_output isn't actually used.
+        if hasattr(self, "_vertex") and self._vertex and self._vertex.outgoing_edges:
+            edges_source_names = getattr(self._vertex, "edges_source_names", set())
+            if "model_output" not in edges_source_names and self._cached_model is not None:
+                return self._cached_model
+        
         try:
             from langchain_aws.chat_models.bedrock_converse import ChatBedrockConverse
         except ImportError as e:
@@ -238,8 +248,29 @@ class AmazonBedrockConverseComponent(LCModelComponent):
         if additional_model_request_fields:
             init_params["additional_model_request_fields"] = additional_model_request_fields
 
+        # Create a cache key based on model parameters to avoid unnecessary recreation
+        import hashlib
+        import json
+        cache_key_data = {
+            "model": init_params.get("model"),
+            "endpoint_url": init_params.get("endpoint_url"),
+            "temperature": init_params.get("temperature"),
+            "top_p": init_params.get("top_p"),
+            "max_tokens": init_params.get("max_tokens"),
+            "disable_streaming": init_params.get("disable_streaming"),
+            "additional_model_request_fields": init_params.get("additional_model_request_fields"),
+        }
+        cache_key = hashlib.md5(json.dumps(cache_key_data, sort_keys=True, default=str).encode()).hexdigest()
+
+        # Return cached model if parameters haven't changed
+        if self._cached_model is not None and self._cached_model_key == cache_key:
+            return self._cached_model
+
         try:
             output = ChatBedrockConverse(**init_params)
+            # Cache the model instance and key
+            self._cached_model = output
+            self._cached_model_key = cache_key
         except Exception as e:
             # Provide helpful error message with fallback suggestions
             error_details = str(e)
