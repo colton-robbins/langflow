@@ -60,6 +60,8 @@ def flatten_list(list_of_lists: list[list | Any]) -> list:
 
 
 def get_artifact_type(value, build_result) -> str:
+    from collections.abc import AsyncIterator, Iterator
+    
     result = ArtifactType.UNKNOWN
     match value:
         case Data():
@@ -78,7 +80,9 @@ def get_artifact_type(value, build_result) -> str:
             result = ArtifactType.MESSAGE
 
     if result == ArtifactType.UNKNOWN and (
-        isinstance(build_result, Generator) or (isinstance(value, Message) and isinstance(value.text, Generator))
+        isinstance(build_result, (Generator, AsyncIterator, Iterator)) 
+        or (isinstance(value, Message) and isinstance(value.text, (Generator, AsyncIterator, Iterator)))
+        or isinstance(value, (AsyncIterator, Iterator))
     ):
         result = ArtifactType.STREAM
 

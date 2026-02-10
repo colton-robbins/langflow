@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from lfx.components.processing.data_operations import DataOperationsComponent
     from lfx.components.processing.dataframe_operations import DataFrameOperationsComponent
     from lfx.components.processing.dataframe_to_toolset import DataFrameToToolsetComponent
+    from lfx.components.processing.extract_dates_from_json import ExtractDatesFromJSONComponent
     from lfx.components.processing.extract_special_instructions import ExtractSpecialInstructionsComponent
     from lfx.components.processing.json_cleaner import JSONCleaner
     from lfx.components.processing.output_parser import OutputParserComponent
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from lfx.components.processing.parser import ParserComponent
     from lfx.components.processing.regex import RegexExtractorComponent
     from lfx.components.processing.split_csv_by_row import SplitCSVByRowComponent
+    from lfx.components.processing.retrieval_result_selector import RetrievalResultSelectorComponent
+    from lfx.components.processing.stop_loss_template_filler import StopLossTemplateFillerComponent
     from lfx.components.processing.split_text import SplitTextComponent
     from lfx.components.processing.store_message import MessageStoreComponent
     from lfx.components.processing.user_context_section_selector import UserContextSectionSelectorComponent
@@ -32,6 +35,7 @@ _dynamic_imports = {
     "DataOperationsComponent": "data_operations",
     "DataFrameOperationsComponent": "dataframe_operations",
     "DataFrameToToolsetComponent": "dataframe_to_toolset",
+    "ExtractDatesFromJSONComponent": "extract_dates_from_json",
     "ExtractSpecialInstructionsComponent": "extract_special_instructions",
     "JSONCleaner": "json_cleaner",
     "OutputParserComponent": "output_parser",
@@ -39,6 +43,8 @@ _dynamic_imports = {
     "ParseDataComponent": "parse_data",
     "ParserComponent": "parser",
     "RegexExtractorComponent": "regex",
+    "RetrievalResultSelectorComponent": "retrieval_result_selector",
+    "StopLossTemplateFillerComponent": "stop_loss_template_filler",
     "SplitCSVByRowComponent": "split_csv_by_row",
     "SplitTextComponent": "split_text",
     "MessageStoreComponent": "store_message",
@@ -51,6 +57,7 @@ __all__ = [
     "DataFrameOperationsComponent",
     "DataFrameToToolsetComponent",
     "DataOperationsComponent",
+    "ExtractDatesFromJSONComponent",
     "ExtractSpecialInstructionsComponent",
     "JSONCleaner",
     "MessageStoreComponent",
@@ -59,7 +66,9 @@ __all__ = [
     "ParseDataComponent",
     "ParserComponent",
     "RegexExtractorComponent",
+    "RetrievalResultSelectorComponent",
     "SplitCSVByRowComponent",
+    "StopLossTemplateFillerComponent",
     "SplitTextComponent",
     "TypeConverterComponent",
     "UserContextSectionSelectorComponent",

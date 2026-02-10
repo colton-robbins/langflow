@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from time import perf_counter
 from typing import Any, AsyncIterator, cast
 
@@ -29,6 +30,13 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
     description: str = "Agent that intercepts ClickHouse tool results and passes them to the next agent on success."
     icon = "Database"
     name = "ClickHouseAgent"
+
+    # Table name to description mapping
+    TABLE_DESCRIPTIONS = {
+        "medispan_drugname": "Drug names",
+        "medical_hcpcs": "HCPCS procedure codes and descriptions",
+        "medical_icd10cm": "ICD-10-CM diagnosis codes and descriptions",
+    }
 
     inputs = [
         *ToolCallingAgentComponent.inputs,
@@ -70,6 +78,41 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
         super().__init__(*args, **kwargs)
         self._tool_succeeded = False
         self._captured_result = None
+
+    @staticmethod
+    def _extract_table_name_from_sql(sql_query: str) -> str | None:
+        """Extract table name from SQL query's FROM clause."""
+        if not sql_query or not isinstance(sql_query, str):
+            return None
+        
+        # Normalize SQL: remove extra whitespace and convert to lowercase for matching
+        sql_normalized = " ".join(sql_query.split()).lower()
+        
+        # Pattern to match: FROM table_name or FROM database.table_name
+        # Handles various SQL formats including JOINs, subqueries, etc.
+        patterns = [
+            r'\bfrom\s+([a-z0-9_]+)',  # Simple FROM table_name
+            r'\bfrom\s+[a-z0-9_]+\s*\.\s*([a-z0-9_]+)',  # FROM database.table_name
+            r'\bjoin\s+([a-z0-9_]+)',  # JOIN table_name
+            r'\bjoin\s+[a-z0-9_]+\s*\.\s*([a-z0-9_]+)',  # JOIN database.table_name
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, sql_normalized, re.IGNORECASE)
+            if match:
+                table_name = match.group(1)
+                # Skip common SQL keywords that might be matched
+                if table_name not in ['select', 'where', 'group', 'order', 'having', 'limit', 'offset']:
+                    return table_name
+        
+        return None
+
+    @staticmethod
+    def _get_table_description(table_name: str | None) -> str | None:
+        """Get table description from mapping."""
+        if not table_name:
+            return None
+        return ClickHouseAgentComponent.TABLE_DESCRIPTIONS.get(table_name.lower())
 
     async def _send_message_noop(self, message: Message, *, skip_db_update: bool = False) -> Message:
         """Local no-op function for send_message_callback when not connected to ChatOutput."""
@@ -208,13 +251,20 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
         send_message_callback: SendMessageFunctionType,
         send_token_callback: OnTokenFunctionType | None = None,
     ) -> Message:
-        """Process agent events and intercept ClickHouse tool results."""
+        """Process agent events and intercept ClickHouse tool results.
+        
+        Collects all successful ClickHouse tool results that have rows,
+        then returns them all together after processing completes.
+        """
         initial_message_id = agent_message.id if hasattr(agent_message, "id") else None
 
         try:
             tool_blocks_map: dict[str, ToolContent] = {}
             had_streaming = False
             start_time = perf_counter()
+            
+            # Track successful results with rows
+            successful_results_with_rows: list[dict[str, Any]] = []
 
             # Determine which tool names to intercept
             tool_names_to_intercept = []
@@ -246,6 +296,18 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
                     if should_intercept and self.pass_results_on_success:
                         await logger.adebug(f"Intercepting tool output for: {tool_name}")
 
+                        # Extract SQL query from tool input to get table name
+                        tool_input = event["data"].get("input", {})
+                        sql_query = None
+                        if isinstance(tool_input, dict):
+                            sql_query = tool_input.get("query") or tool_input.get("input")
+                        elif isinstance(tool_input, str):
+                            sql_query = tool_input
+                        
+                        # Extract table name and description
+                        table_name = self._extract_table_name_from_sql(sql_query) if sql_query else None
+                        table_description = self._get_table_description(table_name)
+
                         # Normalize tool output to a dict when possible
                         parsed: dict[str, Any] | None = None
                         success_flag = None
@@ -267,42 +329,86 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
                             elif "success" in lower and "false" in lower:
                                 success_flag = False
 
-                        # If tool succeeded, capture result and return immediately
+                        # If tool succeeded, check if it has actual rows before capturing
                         if success_flag is True:
-                            self._tool_succeeded = True
-                            await logger.ainfo(f"Tool {tool_name} succeeded, capturing results")
-
-                            # Build payload for downstream agent
+                            # Check if the result has actual rows/data
+                            has_rows = False
+                            
                             if parsed is not None:
-                                payload_obj = parsed
-                                raw_csv = parsed.get("raw_csv")
-                                if isinstance(raw_csv, str) and raw_csv.strip():
-                                    payload_text = raw_csv
-                                else:
-                                    payload_text = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+                                # Check row_count field
+                                row_count = parsed.get("row_count", 0)
+                                if isinstance(row_count, int) and row_count > 0:
+                                    has_rows = True
+                                
+                                # Also check rows array if row_count check didn't work
+                                if not has_rows:
+                                    rows = parsed.get("rows", [])
+                                    if isinstance(rows, list) and len(rows) > 0:
+                                        has_rows = True
+                                
+                                # Check raw_csv for actual data rows (beyond headers)
+                                if not has_rows:
+                                    raw_csv = parsed.get("raw_csv", "")
+                                    if isinstance(raw_csv, str) and raw_csv.strip():
+                                        # Count non-empty lines (excluding header)
+                                        lines = [line.strip() for line in raw_csv.strip().split("\n") if line.strip()]
+                                        # If we have more than just a header line, we have data
+                                        if len(lines) > 1:
+                                            has_rows = True
                             else:
-                                payload_text = str(tool_output)
-                                payload_obj = {"success": True, "output": payload_text}
+                                # If not parsed, check string output for data indicators
+                                if isinstance(tool_output, str):
+                                    lines = [line.strip() for line in tool_output.strip().split("\n") if line.strip()]
+                                    if len(lines) > 1:
+                                        has_rows = True
+                            
+                            if has_rows:
+                                self._tool_succeeded = True
+                                await logger.ainfo(f"Tool {tool_name} succeeded with {parsed.get('row_count', 'unknown') if parsed else 'unknown'} rows, capturing results")
 
-                            # Include original user prompt for context
-                            try:
-                                user_q = (
-                                    self.input_value.text
-                                    if isinstance(self.input_value, Message) and hasattr(self.input_value, "text")
-                                    else str(self.input_value)
-                                )
-                            except Exception:
-                                user_q = ""
+                                # Build payload for downstream agent
+                                if parsed is not None:
+                                    payload_obj = parsed.copy()
+                                    raw_csv = parsed.get("raw_csv")
+                                    if isinstance(raw_csv, str) and raw_csv.strip():
+                                        payload_text = raw_csv
+                                    else:
+                                        payload_text = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+                                else:
+                                    payload_text = str(tool_output)
+                                    payload_obj = {"success": True, "output": payload_text}
 
-                            if user_q and isinstance(payload_obj, dict) and "user_question" not in payload_obj:
-                                payload_obj = {**payload_obj, "user_question": user_q}
+                                # Include original user prompt for context
+                                try:
+                                    user_q = (
+                                        self.input_value.text
+                                        if isinstance(self.input_value, Message) and hasattr(self.input_value, "text")
+                                        else str(self.input_value)
+                                    )
+                                except Exception:
+                                    user_q = ""
 
-                            # Store captured result
-                            self._captured_result = Message(text=payload_text, data=payload_obj)
+                                if user_q and isinstance(payload_obj, dict) and "user_question" not in payload_obj:
+                                    payload_obj["user_question"] = user_q
 
-                            # Return immediately to prevent agent from generating its own response
-                            # The downstream agent will receive this result
-                            return self._captured_result
+                                # Add table name and description to payload
+                                if isinstance(payload_obj, dict):
+                                    if table_name:
+                                        payload_obj["table_name"] = table_name
+                                    if table_description:
+                                        payload_obj["table_description"] = table_description
+                                
+                                # Store the result with rows for later aggregation
+                                successful_results_with_rows.append({
+                                    "payload_obj": payload_obj,
+                                    "payload_text": payload_text,
+                                    "table_name": table_name,
+                                })
+                                
+                                await logger.adebug(f"Collected result from {tool_name} (table: {table_name}), waiting for other queries to complete")
+                            else:
+                                # Tool succeeded but has no rows - continue processing to wait for next tool call
+                                await logger.adebug(f"Tool {tool_name} succeeded but returned no rows, continuing to wait for results with data")
 
                 # Process other tool events
                 elif event["event"] in TOOL_EVENT_HANDLERS:
@@ -330,6 +436,53 @@ class ClickHouseAgentComponent(ToolCallingAgentComponent):
                         agent_message, start_time = await chain_handler(
                             event, agent_message, send_message_callback, None, start_time, had_streaming=had_streaming
                         )
+
+            # After processing all events, check if we have successful results with rows
+            if successful_results_with_rows and self.pass_results_on_success:
+                await logger.ainfo(f"Processing complete. Found {len(successful_results_with_rows)} successful queries with rows")
+                
+                # If we have multiple results, combine them; otherwise return single result
+                if len(successful_results_with_rows) == 1:
+                    # Single result - return it directly
+                    result = successful_results_with_rows[0]
+                    payload_obj = result["payload_obj"]
+                    payload_text = result["payload_text"]
+                    
+                    self._captured_result = Message(text=payload_text, data=payload_obj)
+                    return self._captured_result
+                else:
+                    # Multiple results - combine them into a single payload
+                    combined_results = []
+                    combined_text_parts = []
+                    
+                    for result in successful_results_with_rows:
+                        combined_results.append(result["payload_obj"])
+                        combined_text_parts.append(f"=== Table: {result['table_name'] or 'Unknown'} ===\n{result['payload_text']}\n")
+                    
+                    # Create combined payload
+                    combined_payload_obj = {
+                        "success": True,
+                        "results": combined_results,
+                        "result_count": len(combined_results),
+                    }
+                    
+                    # Include original user prompt for context
+                    try:
+                        user_q = (
+                            self.input_value.text
+                            if isinstance(self.input_value, Message) and hasattr(self.input_value, "text")
+                            else str(self.input_value)
+                        )
+                    except Exception:
+                        user_q = ""
+                    
+                    if user_q:
+                        combined_payload_obj["user_question"] = user_q
+                    
+                    combined_payload_text = "\n".join(combined_text_parts)
+                    
+                    self._captured_result = Message(text=combined_payload_text, data=combined_payload_obj)
+                    return self._captured_result
 
             agent_message.properties.state = "complete"
             agent_message = await send_message_callback(message=agent_message)

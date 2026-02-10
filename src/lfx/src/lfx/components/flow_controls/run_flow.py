@@ -346,3 +346,148 @@ class RunFlowComponent(RunFlowBaseComponent):
             inputs=inputs,
             output_type=output_type,
         )
+
+    async def _resolve_flow_output(self, *, vertex_id: str, output_name: str):
+        """Override to handle streaming iterators from nested flows.
+        
+        When a nested flow outputs a streaming iterator, we need to preserve it
+        so it can be passed through to output nodes. The vertex checks for iterators
+        in self.results["text"] or self.results["message"].text, so we return
+        the iterator directly (which will be stored in results[output_name]).
+        
+        This override ensures iterators are preserved even if the parent class
+        doesn't handle them properly.
+        """
+        from collections.abc import AsyncIterator, Iterator
+        
+        # Get the run outputs directly to check for iterators
+        run_outputs = await self._get_cached_run_outputs(
+            user_id=self.user_id,
+            tweaks=self.flow_tweak_data,
+            inputs=None,
+            output_type="any",
+        )
+
+        if not run_outputs:
+            return None
+        first_output = run_outputs[0]
+        if not first_output.outputs:
+            return None
+        
+        # Look for the result matching our vertex_id
+        for result in first_output.outputs:
+            if not (result and result.component_id == vertex_id):
+                continue
+            
+            # Check results dict first - preserve iterators
+            if isinstance(result.results, dict) and output_name in result.results:
+                output_value = result.results[output_name]
+                # Preserve iterators for streaming
+                if isinstance(output_value, (AsyncIterator, Iterator)):
+                    return output_value
+                # If it's a Message with an iterator in text, preserve the Message
+                # Chat Output will receive this as input_value and should handle it
+                if isinstance(output_value, Message) and isinstance(output_value.text, (AsyncIterator, Iterator)):
+                    # Return the Message with iterator preserved
+                    # The Chat Output component checks isinstance(input_value, Message)
+                    # and will use it, but we need to ensure convert_to_string preserves the iterator
+                    return output_value
+                return output_value
+            
+            # Check artifacts - preserve iterators
+            if result.artifacts and isinstance(result.artifacts, dict) and output_name in result.artifacts:
+                output_value = result.artifacts[output_name]
+                # Preserve iterators for streaming
+                if isinstance(output_value, (AsyncIterator, Iterator)):
+                    return output_value
+                # If it's a Message with an iterator in text, preserve the Message
+                if isinstance(output_value, Message) and isinstance(output_value.text, (AsyncIterator, Iterator)):
+                    # Return the Message with iterator preserved
+                    return output_value
+                return output_value
+            
+            # If results is an iterator itself (for single output components)
+            if isinstance(result.results, (AsyncIterator, Iterator)):
+                return result.results
+            
+            # Fallback to results or artifacts
+            fallback_result = result.results or result.artifacts or result.outputs
+            # Check if fallback is an iterator
+            if isinstance(fallback_result, (AsyncIterator, Iterator)):
+                return fallback_result
+            return fallback_result
+
+        return None
+
+    def _build_artifact(self, result):
+        """Override to preserve streaming iterators.
+        
+        When the result is an iterator, we need to preserve it so the vertex
+        can detect and handle streaming. This prevents the iterator from being
+        consumed during artifact building.
+        """
+        from collections.abc import AsyncIterator, Iterator
+        
+        # If result is an iterator, preserve it by returning a minimal artifact
+        if isinstance(result, (AsyncIterator, Iterator)):
+            return {"repr": "", "raw": result, "type": "stream"}
+        
+        # If result is a Message with an iterator in text, preserve it
+        if isinstance(result, Message) and isinstance(result.text, (AsyncIterator, Iterator)):
+            return {"repr": "", "raw": result, "type": "stream"}
+        
+        # For non-iterator results, use parent's implementation
+        return super()._build_artifact(result)
+
+    async def _build_results(self) -> tuple[dict, dict]:
+        """Override to ensure iterators are preserved in results.
+        
+        This ensures that when an iterator is returned from _resolve_flow_output,
+        it's stored directly in results without being processed by _build_artifact
+        in a way that consumes it.
+        
+        Additionally, when the output name is "message" and contains an iterator,
+        we also store it under "text" so the vertex can detect it.
+        """
+        from collections.abc import AsyncIterator, Iterator
+        
+        results, artifacts = {}, {}
+        
+        self._pre_run_setup_if_needed()
+        self._handle_tool_mode()
+        
+        for output in self._get_outputs_to_process():
+            self._current_output = output.name
+            result = await self._get_output_result(output)
+            
+            # Store the result
+            results[output.name] = result
+            
+            # If output name ends with "message" and result is a Message with iterator,
+            # also store the iterator under "text" key for vertex detection
+            if output.name.endswith("~message") or output.name == "message":
+                if isinstance(result, Message) and isinstance(result.text, (AsyncIterator, Iterator)):
+                    # Extract the iterator and store it under "text" key
+                    # This allows the vertex to detect it via self.results["text"]
+                    results["text"] = result.text
+                    # Also store the Message itself
+                    results["message"] = result
+            
+            # Build artifact - but preserve iterators
+            if isinstance(result, (AsyncIterator, Iterator)):
+                # For iterators, create minimal artifact that preserves the iterator
+                artifacts[output.name] = {"repr": "", "raw": result, "type": "stream"}
+            elif isinstance(result, Message) and isinstance(result.text, (AsyncIterator, Iterator)):
+                # For Messages with iterator text, preserve the Message
+                artifacts[output.name] = {"repr": "", "raw": result, "type": "stream"}
+                # Also create artifact for "text" if we stored it
+                if "text" in results:
+                    artifacts["text"] = {"repr": "", "raw": results["text"], "type": "stream"}
+            else:
+                # For regular results, use normal artifact building
+                artifacts[output.name] = self._build_artifact(result)
+            
+            self._log_output(output)
+        
+        self._finalize_results(results, artifacts)
+        return results, artifacts

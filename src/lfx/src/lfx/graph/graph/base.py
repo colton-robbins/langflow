@@ -939,6 +939,23 @@ class Graph:
         if visited is None:
             visited = set()
         else:
+            # Don't mark output vertices as inactive if they have other active predecessors
+            # This prevents early exits to chat output from being blocked when one branch is stopped
+            if state == "INACTIVE":
+                vertex = self.get_vertex(vertex_id)
+                if vertex.is_output:
+                    # Check if this output vertex has other active predecessors
+                    # (predecessors not in the visited set, meaning they're from other branches)
+                    predecessors = self.predecessor_map.get(vertex_id, [])
+                    other_predecessors = [
+                        p for p in predecessors 
+                        if p not in visited and self.get_vertex(p).is_active()
+                    ]
+                    if other_predecessors:
+                        # This output vertex has other active incoming edges from other branches,
+                        # don't mark it inactive - it should still execute
+                        visited.add(vertex_id)
+                        return visited
             self.mark_vertex(vertex_id, state)
         if vertex_id in visited:
             return visited
@@ -1009,6 +1026,21 @@ class Graph:
 
         # Don't exclude the first vertex (the router itself)
         if not skip_first:
+            # Don't exclude output vertices if they have other active predecessors
+            # This prevents early exits to chat output from being blocked
+            vertex = self.get_vertex(vertex_id)
+            if vertex.is_output:
+                # Check if this output vertex has other active predecessors
+                # (predecessors not in the visited set, meaning they're from other branches)
+                predecessors = self.predecessor_map.get(vertex_id, [])
+                other_predecessors = [
+                    p for p in predecessors 
+                    if p not in visited and self.get_vertex(p).is_active()
+                ]
+                if other_predecessors:
+                    # This output vertex has other active incoming edges from other branches,
+                    # don't exclude it - it should still execute
+                    return
             self.conditionally_excluded_vertices.add(vertex_id)
             excluded.add(vertex_id)
 

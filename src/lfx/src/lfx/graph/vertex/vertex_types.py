@@ -289,7 +289,15 @@ class InterfaceVertex(ComponentVertex):
                 message = dict_to_codeblock(text_output)
             elif isinstance(text_output, Data):
                 message = text_output.text
+            elif isinstance(text_output, AsyncIterator | Iterator):
+                # text_output contains the iterator, use it for streaming
+                stream_url = self.build_stream_url()
+                message = ""
+                self.results["text"] = message
+                self.results["message"].text = message
+                self.built_object = self.results
             elif isinstance(message, AsyncIterator | Iterator):
+                # Fallback: check message if text_output wasn't an iterator
                 stream_url = self.build_stream_url()
                 message = ""
                 self.results["text"] = message

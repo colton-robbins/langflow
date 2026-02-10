@@ -46,6 +46,38 @@ class ParallelDistributorComponent(Component):
             types=["Message"],
             group_outputs=True,
         ),
+        Output(
+            display_name="Output 4",
+            name="output_4",
+            info="Fourth parallel output as Message.",
+            method="distribute_output_4",
+            types=["Message"],
+            group_outputs=True,
+        ),
+        Output(
+            display_name="Output 5",
+            name="output_5",
+            info="Fifth parallel output as Message.",
+            method="distribute_output_5",
+            types=["Message"],
+            group_outputs=True,
+        ),
+        Output(
+            display_name="Output 6",
+            name="output_6",
+            info="Sixth parallel output as Message.",
+            method="distribute_output_6",
+            types=["Message"],
+            group_outputs=True,
+        ),
+        Output(
+            display_name="Output 7",
+            name="output_7",
+            info="Seventh parallel output as Message.",
+            method="distribute_output_7",
+            types=["Message"],
+            group_outputs=True,
+        ),
     ]
 
     def _extract_text(self, input_data):
@@ -172,4 +204,32 @@ class ParallelDistributorComponent(Component):
         self.log("Executing distribute_output_3")
         result = self._to_message(self.input_data)
         self.log(f"distribute_output_3 completed, result text length: {len(result.text)}")
+        return result
+
+    def distribute_output_4(self) -> Message:
+        """Distribute input to fourth output as Message."""
+        self.log("Executing distribute_output_4")
+        result = self._to_message(self.input_data)
+        self.log(f"distribute_output_4 completed, result text length: {len(result.text)}")
+        return result
+
+    def distribute_output_5(self) -> Message:
+        """Distribute input to fifth output as Message."""
+        self.log("Executing distribute_output_5")
+        result = self._to_message(self.input_data)
+        self.log(f"distribute_output_5 completed, result text length: {len(result.text)}")
+        return result
+
+    def distribute_output_6(self) -> Message:
+        """Distribute input to sixth output as Message."""
+        self.log("Executing distribute_output_6")
+        result = self._to_message(self.input_data)
+        self.log(f"distribute_output_6 completed, result text length: {len(result.text)}")
+        return result
+
+    def distribute_output_7(self) -> Message:
+        """Distribute input to seventh output as Message."""
+        self.log("Executing distribute_output_7")
+        result = self._to_message(self.input_data)
+        self.log(f"distribute_output_7 completed, result text length: {len(result.text)}")
         return result

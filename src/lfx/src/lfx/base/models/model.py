@@ -308,7 +308,15 @@ class LCModelComponent(Component):
             if message := self._get_exception_message(e):
                 raise ValueError(message) from e
             raise
-        return lf_message or Message(text=result)
+        # If we have a message from streaming to Chat Output, return it
+        if lf_message:
+            return lf_message
+        # For streaming to non-Chat outputs, wrap the iterator in a Message
+        # The vertex will extract message.text and detect it as an iterator
+        if stream and not self.is_connected_to_chat_output():
+            # Return Message with iterator in text field so vertex can detect and handle it
+            return Message(text=result)
+        return Message(text=result)
 
     async def _handle_stream(self, runnable, inputs):
         """Handle streaming responses from the language model.
@@ -321,8 +329,12 @@ class LCModelComponent(Component):
             tuple: (Message object if connected to chat output, model result)
         """
         lf_message = None
+        # Always use streaming when stream=True, regardless of output type
+        # This allows streaming to work with any output node (Chat Output, Text Output, etc.)
+        stream_iterator = runnable.astream(inputs)
+        
         if self.is_connected_to_chat_output():
-            # Add a Message
+            # For Chat Output: Create a Message with the stream iterator
             if hasattr(self, "graph"):
                 session_id = self.graph.session_id
             elif hasattr(self, "_session_id"):
@@ -330,7 +342,7 @@ class LCModelComponent(Component):
             else:
                 session_id = None
             model_message = Message(
-                text=runnable.astream(inputs),
+                text=stream_iterator,
                 sender=MESSAGE_SENDER_AI,
                 sender_name="AI",
                 properties={"icon": self.icon, "state": "partial"},
@@ -340,8 +352,9 @@ class LCModelComponent(Component):
             lf_message = await self.send_message(model_message)
             result = lf_message.text or ""
         else:
-            message = await runnable.ainvoke(inputs)
-            result = message.content if hasattr(message, "content") else message
+            # For other output types: Return the stream iterator directly
+            # The vertex.stream() method will handle iterating over it
+            result = stream_iterator
         return lf_message, result
 
     @abstractmethod

@@ -1,16 +1,15 @@
 from langflow.field_typing import LanguageModel
-from langflow.inputs.inputs import BoolInput, FloatInput, IntInput, MessageTextInput, SecretStrInput
+from langflow.inputs.inputs import FloatInput, IntInput, MessageTextInput, SecretStrInput
 from langflow.io import DictInput, DropdownInput
 
 from lfx.base.models.aws_constants import AWS_REGIONS, AWS_MODEL_IDs
 from lfx.base.models.model import LCModelComponent
-from lfx.field_typing.range_spec import RangeSpec
 
 
 class AmazonBedrockConverseComponent(LCModelComponent):
     display_name: str = "ANSWER_AWS"
     description: str = (
-        "Generate text using Amazon Bedrock LLMs with the modern Converse API for improved conversation handling."
+        "Generate text using Amazon Bedrock LLMs with the invoke_model API for improved performance."
     )
     icon = "Amazon"
     name = "AmazonBedrockConverseModel"
@@ -23,6 +22,7 @@ class AmazonBedrockConverseComponent(LCModelComponent):
         self._cached_boto3_client = None
         self._cached_model = None
         self._cached_model_key = None
+
 
     inputs = [
         *LCModelComponent.get_base_inputs(),
@@ -102,9 +102,8 @@ class AmazonBedrockConverseComponent(LCModelComponent):
             name="max_tokens",
             display_name="Max Tokens",
             value=4096,
-            info="Maximum number of tokens to generate. Set to 0 for unlimited tokens.",
-            advanced=False,
-            range_spec=RangeSpec(min=0, max=128000),
+            info="Maximum number of tokens to generate.",
+            advanced=True,
         ),
         FloatInput(
             name="top_p",
@@ -121,13 +120,6 @@ class AmazonBedrockConverseComponent(LCModelComponent):
             "Note: Not all models support top_k. Use 'Additional Model Fields' for manual configuration if needed.",
             advanced=True,
         ),
-        BoolInput(
-            name="disable_streaming",
-            display_name="Disable Streaming",
-            value=False,
-            info="If True, disables streaming responses. Useful for batch processing.",
-            advanced=True,
-        ),
         DictInput(
             name="additional_model_fields",
             display_name="Additional Model Fields",
@@ -138,16 +130,8 @@ class AmazonBedrockConverseComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
-        # Optimization: If model_output is not connected and we have a cached model,
-        # return it immediately to avoid expensive boto3 client creation during initialization.
-        # This prevents the 7-second delay when model_output isn't actually used.
-        if hasattr(self, "_vertex") and self._vertex and self._vertex.outgoing_edges:
-            edges_source_names = getattr(self._vertex, "edges_source_names", set())
-            if "model_output" not in edges_source_names and self._cached_model is not None:
-                return self._cached_model
-        
         try:
-            from langchain_aws.chat_models.bedrock_converse import ChatBedrockConverse
+            from langchain_aws import ChatBedrock
         except ImportError as e:
             msg = "langchain_aws is not installed. Please install it with `pip install langchain_aws`."
             raise ImportError(msg) from e
@@ -157,7 +141,7 @@ class AmazonBedrockConverseComponent(LCModelComponent):
         except ImportError as e:
             msg = "boto3 is not installed. Please install it with `pip install boto3`."
             raise ImportError(msg) from e
-
+        
         # Cache boto3 session to avoid creating multiple sessions
         if self._cached_boto3_session is None:
             if self.aws_access_key_id or self.aws_secret_access_key:
@@ -174,7 +158,7 @@ class AmazonBedrockConverseComponent(LCModelComponent):
                 self._cached_boto3_session = boto3.Session(profile_name=self.credentials_profile_name)
             else:
                 self._cached_boto3_session = boto3.Session()
-
+        
         session = self._cached_boto3_session
 
         # Optimize boto3 client configuration for connection reuse and performance
@@ -196,98 +180,84 @@ class AmazonBedrockConverseComponent(LCModelComponent):
         if self.region_name:
             client_params["region_name"] = self.region_name
 
-        # Cache boto3 client to avoid creating multiple clients and prevent file handle leaks
+        # Cache boto3 client to avoid creating multiple clients
         if self._cached_boto3_client is None:
             self._cached_boto3_client = session.client("bedrock-runtime", **client_params)
-
+        
         boto3_client = self._cached_boto3_client
-
-        # Prepare initialization parameters
-        init_params = {
-            "model": self.model_id,
-            "client": boto3_client,
-        }
-
-        # Note: When passing a client, region_name and credentials are handled by the client
-        # Only add endpoint_url if not already in client_params
-        if self.endpoint_url:
-            init_params["endpoint_url"] = self.endpoint_url
-
+        
+        # Build model_kwargs from individual parameters
+        # ChatBedrock expects parameters directly in model_kwargs using snake_case
+        # It will handle conversion to camelCase and wrapping in inferenceConfig internally
+        model_kwargs = {}
+        
         # Add model parameters - only send one of temperature or top_p based on sampling_strategy
         sampling_strategy = getattr(self, "sampling_strategy", "temperature")
         
         if sampling_strategy == "top_p":
             if hasattr(self, "top_p") and self.top_p is not None:
-                init_params["top_p"] = self.top_p
+                model_kwargs["top_p"] = self.top_p
         else:
             # Default to temperature if not specified or if sampling_strategy is "temperature"
             if hasattr(self, "temperature") and self.temperature is not None:
-                init_params["temperature"] = self.temperature
+                model_kwargs["temperature"] = self.temperature
         
         if hasattr(self, "max_tokens") and self.max_tokens is not None:
-            init_params["max_tokens"] = self.max_tokens
+            model_kwargs["max_tokens"] = self.max_tokens
+        
+        # Note: top_k may not be supported by all models or for streaming
+        # Only add if explicitly provided and not None
+        if hasattr(self, "top_k") and self.top_k is not None:
+            # Some models don't support top_k, so we'll let ChatBedrock handle validation
+            model_kwargs["top_k"] = self.top_k
 
-        # Handle streaming - only disable if explicitly requested
-        if hasattr(self, "disable_streaming") and self.disable_streaming:
-            init_params["disable_streaming"] = True
-
-        # Handle additional model request fields carefully
-        # Based on the error, inferenceConfig should not be passed as additional fields for some models
-        additional_model_request_fields = {}
-
-        # Only add top_k if user explicitly provided additional fields or if needed for specific models
+        # Handle additional model fields
+        # ChatBedrock expects parameters at top level of model_kwargs in snake_case
         if hasattr(self, "additional_model_fields") and self.additional_model_fields:
             for field in self.additional_model_fields:
                 if isinstance(field, dict):
-                    additional_model_request_fields.update(field)
-
-        # For now, don't automatically add inferenceConfig for top_k to avoid validation errors
-        # Users can manually add it via additional_model_fields if their model supports it
-
-        # Only add if we have actual additional fields
-        if additional_model_request_fields:
-            init_params["additional_model_request_fields"] = additional_model_request_fields
+                    # If field contains inferenceConfig, extract its contents
+                    if "inferenceConfig" in field and isinstance(field["inferenceConfig"], dict):
+                        # Merge inferenceConfig contents directly
+                        # ChatBedrock will handle any format conversion needed
+                        for key, value in field["inferenceConfig"].items():
+                            model_kwargs[key] = value
+                    else:
+                        # Merge other fields directly (excluding inferenceConfig wrapper)
+                        for key, value in field.items():
+                            if key != "inferenceConfig":
+                                model_kwargs[key] = value
 
         # Create a cache key based on model parameters to avoid unnecessary recreation
         import hashlib
         import json
         cache_key_data = {
-            "model": init_params.get("model"),
-            "endpoint_url": init_params.get("endpoint_url"),
-            "temperature": init_params.get("temperature"),
-            "top_p": init_params.get("top_p"),
-            "max_tokens": init_params.get("max_tokens"),
-            "disable_streaming": init_params.get("disable_streaming"),
-            "additional_model_request_fields": init_params.get("additional_model_request_fields"),
+            "model_id": self.model_id,
+            "region_name": self.region_name,
+            "model_kwargs": model_kwargs,
+            "endpoint_url": self.endpoint_url,
+            "streaming": self.stream,
         }
         cache_key = hashlib.md5(json.dumps(cache_key_data, sort_keys=True, default=str).encode()).hexdigest()
 
         # Return cached model if parameters haven't changed
         if self._cached_model is not None and self._cached_model_key == cache_key:
             return self._cached_model
-
+        
         try:
-            output = ChatBedrockConverse(**init_params)
+            output = ChatBedrock(
+                client=boto3_client,
+                model_id=self.model_id,
+                region_name=self.region_name,
+                model_kwargs=model_kwargs,
+                endpoint_url=self.endpoint_url,
+                streaming=self.stream,
+            )
             # Cache the model instance and key
             self._cached_model = output
             self._cached_model_key = cache_key
         except Exception as e:
-            # Provide helpful error message with fallback suggestions
-            error_details = str(e)
-            if "validation error" in error_details.lower():
-                msg = (
-                    f"ChatBedrockConverse validation error: {error_details}. "
-                    f"This may be due to incompatible parameters for model '{self.model_id}'. "
-                    f"Consider adjusting the model parameters or trying the legacy Amazon Bedrock component."
-                )
-            elif "converse api" in error_details.lower():
-                msg = (
-                    f"Converse API error: {error_details}. "
-                    f"The model '{self.model_id}' may not support the Converse API. "
-                    f"Try using the legacy Amazon Bedrock component instead."
-                )
-            else:
-                msg = f"Could not initialize ChatBedrockConverse: {error_details}"
+            msg = f"Could not connect to AmazonBedrock API: {str(e)}"
             raise ValueError(msg) from e
 
         return output

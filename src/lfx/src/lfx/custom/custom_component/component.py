@@ -1291,7 +1291,16 @@ class Component(CustomComponent):
 
     def extract_data(self, result):
         """Extract the data from the result. this is where the self.status is set."""
+        from collections.abc import AsyncIterator, Iterator
+        
+        # Preserve iterators for streaming - don't process them
+        if isinstance(result, (AsyncIterator, Iterator)):
+            return result
+        
         if isinstance(result, Message):
+            # If Message.text is an iterator, preserve it
+            if isinstance(result.text, (AsyncIterator, Iterator)):
+                return result
             self.status = result.get_text()
             return (
                 self.status if self.status is not None else "No text available"

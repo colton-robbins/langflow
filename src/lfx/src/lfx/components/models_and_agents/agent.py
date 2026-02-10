@@ -10,6 +10,8 @@ from pydantic import ValidationError
 from lfx.components.models_and_agents.memory import MemoryComponent
 
 if TYPE_CHECKING:
+    from langchain.agents import AgentExecutor, BaseMultiActionAgent, BaseSingleActionAgent
+    from langchain_core.runnables import Runnable
     from langchain_core.tools import Tool
 
 from lfx.base.agents.agent import LCToolsAgentComponent
@@ -218,6 +220,13 @@ class AgentComponent(ToolCallingAgentComponent):
         *LCToolsAgentComponent.get_base_inputs(),
         # removed memory inputs from agent component
         # *memory_inputs,
+        BoolInput(
+            name="stream",
+            display_name="Stream",
+            info="Stream the response from the agent. When enabled, the agent will stream tokens as they are generated.",
+            advanced=True,
+            value=False,
+        ),
         BoolInput(
             name="add_current_date_tool",
             display_name="Current Date",
@@ -500,7 +509,16 @@ class AgentComponent(ToolCallingAgentComponent):
                 system_prompt=self.system_prompt,
             )
             agent = self.create_agent_runnable()
-            result = await self.run_agent(agent)
+            
+            # Check if streaming is enabled
+            stream_enabled = getattr(self, "stream", False)
+            
+            if stream_enabled:
+                # Return streaming response
+                result = await self.run_agent_stream(agent)
+            else:
+                # Use existing non-streaming behavior
+                result = await self.run_agent(agent)
 
             # Store result for potential JSON output
             self._agent_result = result
@@ -517,6 +535,172 @@ class AgentComponent(ToolCallingAgentComponent):
             raise
         else:
             return result
+
+    async def run_agent_stream(
+        self,
+        agent: "Runnable | BaseSingleActionAgent | BaseMultiActionAgent | AgentExecutor",
+    ) -> Message:
+        """Run agent with streaming enabled.
+        
+        Returns a Message with a stream iterator in the text field that yields
+        text chunks as the agent generates them.
+        """
+        from langchain.agents import AgentExecutor, BaseMultiActionAgent, BaseSingleActionAgent
+        from langchain_core.agents import AgentExecutor as BaseAgentExecutor
+        from langchain_core.messages import AIMessageChunk
+        from langchain_core.runnables import Runnable
+        
+        from lfx.base.agents.agent import AgentAsyncHandler
+        from lfx.base.agents.events import _extract_output_text
+        from lfx.base.agents.utils import get_chat_output_sender_name
+        from lfx.utils.constants import MESSAGE_SENDER_AI
+        
+        if isinstance(agent, (AgentExecutor, BaseAgentExecutor)):
+            runnable = agent
+        else:
+            handle_parsing_errors = hasattr(self, "handle_parsing_errors") and self.handle_parsing_errors
+            verbose = hasattr(self, "verbose") and self.verbose
+            max_iterations = hasattr(self, "max_iterations") and self.max_iterations
+            runnable = AgentExecutor.from_agent_and_tools(
+                agent=agent,
+                tools=self.tools or [],
+                handle_parsing_errors=handle_parsing_errors,
+                verbose=verbose,
+                max_iterations=max_iterations,
+            )
+        
+        # Use the same input_dict preparation as run_agent
+        # (Copy the input_dict preparation logic from run_agent method)
+        input_dict = self._prepare_agent_input_dict()
+        
+        # Get session_id
+        if hasattr(self, "graph"):
+            session_id = self.graph.session_id
+        elif hasattr(self, "_session_id"):
+            session_id = self._session_id
+        else:
+            session_id = None
+        
+        # Create async generator that yields text chunks from agent events
+        async def agent_stream_generator():
+            """Generate text chunks from agent streaming events."""
+            async for event in runnable.astream_events(
+                input_dict,
+                config={"callbacks": [AgentAsyncHandler(self.log), *self._get_shared_callbacks()]},
+                version="v2",
+            ):
+                # Only yield text from LLM streaming events
+                if event.get("event") in ("on_chain_stream", "on_chat_model_stream"):
+                    data_chunk = event.get("data", {}).get("chunk")
+                    if isinstance(data_chunk, AIMessageChunk):
+                        output_text = _extract_output_text(data_chunk.content)
+                        if output_text and output_text.strip():
+                            yield output_text
+        
+        # Create Message with stream iterator
+        sender_name = get_chat_output_sender_name(self) or self.display_name or "AI"
+        stream_message = Message(
+            text=agent_stream_generator(),
+            sender=MESSAGE_SENDER_AI,
+            sender_name=sender_name,
+            properties={"icon": "Bot", "state": "partial"},
+            session_id=session_id,
+        )
+        stream_message.properties.source = self._build_source(self._id, self.display_name, self)
+        
+        # If connected to chat output, send the message for streaming
+        if self.is_connected_to_chat_output():
+            lf_message = await self.send_message(stream_message)
+            return lf_message
+        
+        return stream_message
+
+    def _prepare_agent_input_dict(self) -> dict:
+        """Prepare input dictionary for agent execution.
+        
+        Extracted from run_agent to be reused by run_agent_stream.
+        """
+        from langchain_core.messages import BaseMessage, HumanMessage
+        
+        lc_message = None
+        if isinstance(self.input_value, Message):
+            lc_message = self.input_value.to_lc_message()
+            if hasattr(lc_message, "content"):
+                if isinstance(lc_message.content, str):
+                    input_dict: dict[str, str | list[BaseMessage] | BaseMessage] = {"input": lc_message.content}
+                elif isinstance(lc_message.content, list):
+                    text_parts = [item.get("text", "") for item in lc_message.content if item.get("type") == "text"]
+                    input_dict = {"input": " ".join(text_parts) if text_parts else ""}
+                else:
+                    input_dict = {"input": str(lc_message.content)}
+            else:
+                input_dict = {"input": str(lc_message)}
+        else:
+            input_dict = {"input": self.input_value}
+        
+        if "input" not in input_dict:
+            input_dict = {"input": self.input_value}
+        
+        # Extract system_prompt
+        if hasattr(self, "system_prompt") and self.system_prompt:
+            system_prompt_text = None
+            if isinstance(self.system_prompt, Message):
+                if hasattr(self.system_prompt, "text") and self.system_prompt.text:
+                    system_prompt_text = self.system_prompt.text.strip()
+                elif hasattr(self.system_prompt, "format_text"):
+                    formatted = self.system_prompt.format_text()
+                    system_prompt_text = formatted.strip() if formatted else None
+                else:
+                    system_prompt_text = str(self.system_prompt).strip()
+            elif isinstance(self.system_prompt, str):
+                system_prompt_text = self.system_prompt.strip()
+            else:
+                system_prompt_text = str(self.system_prompt).strip() if self.system_prompt else None
+            
+            if system_prompt_text:
+                input_dict["system_prompt"] = system_prompt_text
+        
+        # Handle chat_history
+        if hasattr(self, "chat_history") and self.chat_history:
+            if isinstance(self.chat_history, Data):
+                input_dict["chat_history"] = self._data_to_messages_skip_empty([self.chat_history])
+            elif all(hasattr(m, "to_data") and callable(m.to_data) and "text" in m.data for m in self.chat_history):
+                input_dict["chat_history"] = self._data_to_messages_skip_empty(self.chat_history)
+            elif all(isinstance(m, Message) for m in self.chat_history):
+                input_dict["chat_history"] = self._data_to_messages_skip_empty([m.to_data() for m in self.chat_history])
+        
+        # Handle multimodal input
+        if lc_message is not None and hasattr(lc_message, "content") and isinstance(lc_message.content, list):
+            image_dicts = [item for item in lc_message.content if item.get("type") in ("image", "image_url")]
+            text_content = [item for item in lc_message.content if item.get("type") not in ("image", "image_url")]
+            text_strings = [
+                item.get("text", "")
+                for item in text_content
+                if item.get("type") == "text" and item.get("text", "").strip()
+            ]
+            input_dict["input"] = " ".join(text_strings) if text_strings else ""
+            if isinstance(input_dict["input"], list) or not input_dict["input"]:
+                input_dict["input"] = "Process the provided images."
+            if "chat_history" not in input_dict:
+                input_dict["chat_history"] = []
+            if isinstance(input_dict["chat_history"], list):
+                input_dict["chat_history"].extend(HumanMessage(content=[image_dict]) for image_dict in image_dicts)
+            else:
+                input_dict["chat_history"] = [HumanMessage(content=[image_dict]) for image_dict in image_dicts]
+        
+        # Ensure input is not empty
+        current_input = input_dict.get("input", "")
+        if isinstance(current_input, list):
+            current_input = " ".join(map(str, current_input))
+        elif not isinstance(current_input, str):
+            current_input = str(current_input)
+        
+        if not current_input.strip():
+            input_dict["input"] = "Continue the conversation."
+        else:
+            input_dict["input"] = current_input
+        
+        return input_dict
 
     def _preprocess_schema(self, schema):
         """Preprocess schema to ensure correct data types for build_model_from_schema."""
