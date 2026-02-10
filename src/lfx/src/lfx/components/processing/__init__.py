@@ -55,7 +55,6 @@ __all__ = [
     "CombineTextComponent",
     "CreateListComponent",
     "DataFrameOperationsComponent",
-    "DataFrameToToolsetComponent",
     "DataOperationsComponent",
     "ExtractDatesFromJSONComponent",
     "ExtractSpecialInstructionsComponent",

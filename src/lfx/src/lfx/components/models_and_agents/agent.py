@@ -16,11 +16,19 @@ if TYPE_CHECKING:
 
 from lfx.base.agents.agent import LCToolsAgentComponent
 from lfx.base.agents.events import ExceptionWithMessageError
+from lfx.base.models.unified_models import (
+    get_language_model_options,
+    get_llm,
+    update_model_options_in_build_config,
+)
+from lfx.base.models.watsonx_constants import IBM_WATSONX_URLS
 from lfx.components.helpers import CurrentDateComponent
 from lfx.components.langchain_utilities.tool_calling import ToolCallingAgentComponent
 from lfx.custom.custom_component.component import get_component_toolkit
+from lfx.field_typing.range_spec import RangeSpec
 from lfx.helpers.base_model import build_model_from_schema
-from lfx.io import BoolInput, HandleInput, IntInput, MessageTextInput, MultilineInput, Output, SecretStrInput, TableInput
+from lfx.inputs.inputs import BoolInput, DropdownInput, StrInput
+from lfx.io import HandleInput, IntInput, MessageTextInput, MultilineInput, Output, SecretStrInput, TableInput
 from lfx.log.logger import logger
 from lfx.schema.data import Data
 from lfx.schema.dotdict import dotdict
@@ -134,6 +142,22 @@ class AgentComponent(ToolCallingAgentComponent):
             real_time_refresh=True,
             advanced=True,
         ),
+        DropdownInput(
+            name="base_url_ibm_watsonx",
+            display_name="watsonx API Endpoint",
+            info="The base URL of the API (IBM watsonx.ai only)",
+            options=IBM_WATSONX_URLS,
+            value=IBM_WATSONX_URLS[0],
+            show=False,
+            real_time_refresh=True,
+        ),
+        StrInput(
+            name="project_id",
+            display_name="watsonx Project ID",
+            info="The project ID associated with the foundation model (IBM watsonx.ai only)",
+            show=False,
+            required=False,
+        ),
         MultilineInput(
             name="system_prompt",
             display_name="Agent Instructions",
@@ -155,6 +179,13 @@ class AgentComponent(ToolCallingAgentComponent):
             info="Number of chat history messages to retrieve.",
             advanced=True,
             show=True,
+        ),
+        IntInput(
+            name="max_tokens",
+            display_name="Max Tokens",
+            info="Maximum number of tokens to generate. Field name varies by provider.",
+            advanced=True,
+            range_spec=RangeSpec(min=1, max=128000, step=1, step_type="int"),
         ),
         MultilineInput(
             name="format_instructions",
@@ -445,8 +476,17 @@ class AgentComponent(ToolCallingAgentComponent):
         """Get the agent requirements for the agent."""
         from langchain_core.tools import StructuredTool
 
-        # With HandleInput, model is already a BaseLanguageModel instance
-        llm_model = self.model
+        max_tokens_val = getattr(self, "max_tokens", None)
+        if max_tokens_val in {"", 0}:
+            max_tokens_val = None
+        llm_model = get_llm(
+            model=self.model,
+            user_id=self.user_id,
+            api_key=self.api_key,
+            max_tokens=max_tokens_val,
+            watsonx_url=getattr(self, "base_url_ibm_watsonx", None),
+            watsonx_project_id=getattr(self, "project_id", None),
+        )
         if llm_model is None:
             msg = "No language model connected. Please connect a Language Model component to the model input."
             raise ValueError(msg)
@@ -926,12 +966,59 @@ class AgentComponent(ToolCallingAgentComponent):
         field_value: list[dict],
         field_name: str | None = None,
     ) -> dotdict:
-        # With HandleInput, no dynamic model options needed
-        # Model is connected via handle from Language Model component
-        
-        # Update input types for all fields
-        build_config = self.update_input_types(build_config)
+        # Update model options with caching (for all field changes)
+        # Agents require tool calling, so filter for only tool-calling capable models
+        def get_tool_calling_model_options(user_id=None):
+            return get_language_model_options(user_id=user_id, tool_calling=True)
 
+        build_config = update_model_options_in_build_config(
+            component=self,
+            build_config=dict(build_config),
+            cache_key_prefix="language_model_options_tool_calling",
+            get_options_func=get_tool_calling_model_options,
+            field_name=field_name,
+            field_value=field_value,
+        )
+        build_config = dotdict(build_config)
+
+        # Iterate over all providers in the MODEL_PROVIDERS_DICT
+        if field_name == "model":
+            # Update input types for all fields
+            build_config = self.update_input_types(build_config)
+
+            # Show/hide provider-specific fields based on selected model
+            current_model_value = field_value if field_name == "model" else build_config.get("model", {}).get("value")
+            if isinstance(current_model_value, list) and len(current_model_value) > 0:
+                selected_model = current_model_value[0]
+                provider = selected_model.get("provider", "")
+
+                # Show/hide watsonx fields
+                is_watsonx = provider == "IBM WatsonX"
+                if "base_url_ibm_watsonx" in build_config:
+                    build_config["base_url_ibm_watsonx"]["show"] = is_watsonx
+                    build_config["base_url_ibm_watsonx"]["required"] = is_watsonx
+                if "project_id" in build_config:
+                    build_config["project_id"]["show"] = is_watsonx
+                    build_config["project_id"]["required"] = is_watsonx
+
+            # Validate required keys
+            default_keys = [
+                "code",
+                "_type",
+                "model",
+                "tools",
+                "input_value",
+                "add_current_date_tool",
+                "system_prompt",
+                "agent_description",
+                "max_iterations",
+                "handle_parsing_errors",
+                "verbose",
+            ]
+            missing_keys = [key for key in default_keys if key not in build_config]
+            if missing_keys:
+                msg = f"Missing required keys in build_config: {missing_keys}"
+                raise ValueError(msg)
         return dotdict({k: v.to_dict() if hasattr(v, "to_dict") else v for k, v in build_config.items()})
 
     async def _get_tools(self) -> list[Tool]:

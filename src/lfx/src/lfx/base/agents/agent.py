@@ -207,26 +207,25 @@ class LCAgentComponent(Component):
         if "input" not in input_dict:
             input_dict = {"input": self.input_value}
 
-        # Extract system_prompt text, handling both string and Message inputs
-        if hasattr(self, "system_prompt") and self.system_prompt:
-            system_prompt_text = None
+        # Use enhanced prompt if available (set by IBM Granite handler), otherwise extract from system_prompt
+        system_prompt_to_use = getattr(self, "_effective_system_prompt", None)
+        if system_prompt_to_use is None and hasattr(self, "system_prompt") and self.system_prompt:
             if isinstance(self.system_prompt, Message):
-                # If it's a Message object, extract the text
                 if hasattr(self.system_prompt, "text") and self.system_prompt.text:
-                    system_prompt_text = self.system_prompt.text.strip()
+                    system_prompt_to_use = self.system_prompt.text.strip()
                 elif hasattr(self.system_prompt, "format_text"):
-                    # Format the template if it exists
                     formatted = self.system_prompt.format_text()
-                    system_prompt_text = formatted.strip() if formatted else None
+                    system_prompt_to_use = formatted.strip() if formatted else None
                 else:
-                    system_prompt_text = str(self.system_prompt).strip()
+                    system_prompt_to_use = str(self.system_prompt).strip()
             elif isinstance(self.system_prompt, str):
-                system_prompt_text = self.system_prompt.strip()
+                system_prompt_to_use = self.system_prompt.strip()
             else:
-                system_prompt_text = str(self.system_prompt).strip() if self.system_prompt else None
-            
-            if system_prompt_text:
-                input_dict["system_prompt"] = system_prompt_text
+                system_prompt_to_use = str(self.system_prompt).strip() if self.system_prompt else None
+        elif system_prompt_to_use is None:
+            system_prompt_to_use = getattr(self, "system_prompt", None)
+        if system_prompt_to_use and system_prompt_to_use.strip():
+            input_dict["system_prompt"] = system_prompt_to_use
 
         if hasattr(self, "chat_history") and self.chat_history:
             if isinstance(self.chat_history, Data):
@@ -312,9 +311,11 @@ class LCAgentComponent(Component):
                 on_token_callback,
             )
         except ExceptionWithMessageError as e:
-            if hasattr(e, "agent_message") and hasattr(e.agent_message, "id"):
-                msg_id = e.agent_message.id
-                await delete_message(id_=msg_id)
+            # Only delete message from database if it has an ID (was stored)
+            if hasattr(e, "agent_message"):
+                msg_id = e.agent_message.get_id()
+                if msg_id:
+                    await delete_message(id_=msg_id)
             await self._send_message_event(e.agent_message, category="remove_message")
             logger.error(f"ExceptionWithMessageError: {e}")
             raise
